@@ -58,28 +58,7 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Production CORS configuration with security
 const corsOptions = {
-  origin: function (origin, callback) {
-    // Allow requests with no origin (mobile apps, Postman, etc.)
-    if (!origin) return callback(null, true);
-
-    if (process.env.NODE_ENV !== 'production') {
-      // In development, allow all origins to prevent connection issues across devices
-      return callback(null, true);
-    }
-
-    const allowedOrigins = [
-      "https://yourdomain.com", // Replace with your actual domain
-      "https://multi-games-server.onrender.com",
-      "https://web-production-df776.up.railway.app"
-    ];
-
-    if (allowedOrigins.indexOf(origin) !== -1) {
-      callback(null, true);
-    } else {
-      console.warn(`🔒 [SECURITY] Blocked CORS request from origin: ${origin}`);
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
+  origin: "*", // Allow all origins for easier connection during development and testing
   methods: ["GET", "POST"],
   credentials: true,
   optionsSuccessStatus: 200 // For legacy browser support
