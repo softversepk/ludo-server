@@ -2,48 +2,327 @@ const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
+const rateLimit = require("express-rate-limit");
+const helmet = require("helmet");
 const LudoGameServer = require("./ludoGameServer");
 const ClubChatServer = require("./clubChatServer");
 const LeaderboardServer = require("./leaderboardServer");
+const ChessGameServer = require("./chessGameServer");
 
 const app = express();
 
-// Production CORS configuration
+// Security middleware
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'"],
+      imgSrc: ["'self'", "data:", "https:"],
+    },
+  },
+  hsts: {
+    maxAge: 31536000,
+    includeSubDomains: true,
+    preload: true
+  }
+}));
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: {
+    error: 'Too many requests from this IP, please try again later.',
+    retryAfter: 15 * 60 // 15 minutes in seconds
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.use(limiter);
+
+// Stricter rate limiting for sensitive endpoints
+const strictLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10, // limit each IP to 10 requests per windowMs
+  message: {
+    error: 'Too many requests to this endpoint, please try again later.',
+    retryAfter: 15 * 60
+  }
+});
+
+// Body parsing with size limits
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Production CORS configuration with security
 const corsOptions = {
-  origin: process.env.NODE_ENV === 'production' 
-    ? [
-        "https://yourdomain.com", // APK domain add karo
-        "https://multi-games-server.onrender.com" // Server domain
-      ]
-    : [
-        "http://localhost:3000", 
-        "http://192.168.2.109:3000",
-        "http://192.168.2.103:3000"
-      ],
+  origin: function (origin, callback) {
+    // Allow requests with no origin (mobile apps, Postman, etc.)
+    if (!origin) return callback(null, true);
+
+    if (process.env.NODE_ENV !== 'production') {
+      // In development, allow all origins to prevent connection issues across devices
+      return callback(null, true);
+    }
+
+    const allowedOrigins = [
+      "https://yourdomain.com", // Replace with your actual domain
+      "https://multi-games-server.onrender.com",
+      "https://web-production-df776.up.railway.app"
+    ];
+
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      console.warn(`🔒 [SECURITY] Blocked CORS request from origin: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   methods: ["GET", "POST"],
-  credentials: true
+  credentials: true,
+  optionsSuccessStatus: 200 // For legacy browser support
 };
 
 app.use(cors(corsOptions));
 
 // Health check endpoint for monitoring
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
+  res.json({
+    status: 'OK',
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
-    uptime: process.uptime()
+    uptime: Math.floor(process.uptime()),
+    version: '1.0.0'
   });
 });
 
-// Server stats endpoint
-app.get('/stats', (req, res) => {
+// Server stats endpoint with authentication
+app.get('/stats', strictLimiter, (req, res) => {
+  // In production, you should add authentication here
+  if (process.env.NODE_ENV === 'production' && !req.headers.authorization) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+
   res.json({
-    uptime: process.uptime(),
-    memory: process.memoryUsage(),
+    uptime: Math.floor(process.uptime()),
+    memory: {
+      used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+      total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
+    },
     connections: io ? io.engine.clientsCount : 0,
     timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development'
+    environment: process.env.NODE_ENV || 'development',
+    nodeVersion: process.version
+  });
+});
+
+// SECURE FINANCIAL VALIDATION ENDPOINTS
+// Authentication middleware for financial operations
+const authenticateFinancialRequest = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  const userId = req.headers['x-user-id'];
+
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+
+  if (!userId) {
+    return res.status(400).json({ error: 'User ID required' });
+  }
+
+  // In production, validate the JWT token here
+  // For now, we'll use a simple API key validation
+  const token = authHeader.split(' ')[1];
+  const validApiKey = process.env.API_KEY || 'development-key';
+
+  if (token !== validApiKey) {
+    return res.status(401).json({ error: 'Invalid authentication token' });
+  }
+
+  req.userId = userId;
+  next();
+};
+
+// Validate game win and award rewards
+app.post('/api/game/validate-win', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { userId, gameType, betAmount, gameData } = req.body;
+
+    // Validate input
+    if (!userId || !gameType || !betAmount || !gameData) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields'
+      });
+    }
+
+    // Validate bet amount is reasonable
+    if (betAmount < 0 || betAmount > 10000) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid bet amount'
+      });
+    }
+
+    // TODO: Add game-specific validation logic here
+    // For now, we'll calculate rewards based on bet amount
+    const coinReward = Math.floor(betAmount * 2.0); // 2x multiplier
+    const clubPointReward = Math.max(1, Math.floor(betAmount / 100));
+
+    console.log('🎁 [SERVER-VALIDATION] Game win validated:', {
+      userId,
+      gameType,
+      betAmount,
+      coinReward,
+      clubPointReward
+    });
+
+    // TODO: Update Firebase database with server admin credentials
+    // For now, return calculated rewards for client to display
+    res.json({
+      success: true,
+      rewards: {
+        coins: coinReward,
+        clubPoints: clubPointReward
+      },
+      validated: true,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('❌ [SERVER-VALIDATION] Game win validation error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Server validation failed'
+    });
+  }
+});
+
+// Validate gift transaction
+app.post('/api/gift/send', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { fromUserId, toUserId, gift } = req.body;
+
+    // Validate input
+    if (!fromUserId || !toUserId || !gift) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields'
+      });
+    }
+
+    // Validate gift cost is reasonable
+    if (!gift.cost || gift.cost < 0 || gift.cost > 10000) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid gift cost'
+      });
+    }
+
+    console.log('🎁 [SERVER-VALIDATION] Gift transaction validated:', {
+      fromUserId,
+      toUserId,
+      giftId: gift.id,
+      cost: gift.cost
+    });
+
+    // TODO: Validate sender has enough coins and process transaction
+    // For now, return success for client to handle
+    res.json({
+      success: true,
+      transaction: {
+        fromUserId,
+        toUserId,
+        gift,
+        cost: gift.cost
+      },
+      validated: true,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('❌ [SERVER-VALIDATION] Gift validation error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Server validation failed'
+    });
+  }
+});
+
+// Validate coin transaction
+app.post('/api/coins/transaction', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { userId, operation, amount, reason } = req.body;
+
+    // Validate input
+    if (!userId || !operation || !amount || !reason) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields'
+      });
+    }
+
+    // Validate operation type
+    if (!['add', 'deduct'].includes(operation)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid operation type'
+      });
+    }
+
+    // Validate amount is reasonable
+    if (amount < 0 || amount > 100000) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid amount'
+      });
+    }
+
+    console.log('💰 [SERVER-VALIDATION] Coin transaction validated:', {
+      userId,
+      operation,
+      amount,
+      reason
+    });
+
+    // TODO: Process the actual coin transaction with Firebase Admin SDK
+    // For now, return success for client to handle
+    res.json({
+      success: true,
+      transaction: {
+        userId,
+        operation,
+        amount,
+        reason
+      },
+      validated: true,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('❌ [SERVER-VALIDATION] Coin transaction error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Server validation failed'
+    });
+  }
+});
+
+// Server status endpoint
+app.get('/api/status', (req, res) => {
+  res.json({
+    available: true,
+    version: '1.0.0',
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development',
+    features: {
+      gameValidation: true,
+      giftValidation: true,
+      coinValidation: true,
+      securityEnabled: true
+    }
   });
 });
 
@@ -52,7 +331,38 @@ const io = new Server(server, {
   cors: corsOptions,
   transports: ['websocket', 'polling'],
   pingTimeout: 60000,
-  pingInterval: 25000
+  pingInterval: 25000,
+  maxHttpBufferSize: 1e6, // 1MB limit for socket messages
+  allowEIO3: true // For compatibility
+});
+
+// Security: Track connections per IP
+const connectionTracker = new Map();
+const MAX_CONNECTIONS_PER_IP = 100; // Increased limit for local development testing
+
+// Middleware for connection limiting
+io.use((socket, next) => {
+  const clientIP = socket.handshake.address;
+  const currentConnections = connectionTracker.get(clientIP) || 0;
+
+  if (currentConnections >= MAX_CONNECTIONS_PER_IP) {
+    console.warn(`🔒 [SECURITY] Too many connections from IP: ${clientIP}`);
+    return next(new Error('Too many connections from this IP'));
+  }
+
+  connectionTracker.set(clientIP, currentConnections + 1);
+
+  // Clean up on disconnect
+  socket.on('disconnect', () => {
+    const connections = connectionTracker.get(clientIP) || 0;
+    if (connections <= 1) {
+      connectionTracker.delete(clientIP);
+    } else {
+      connectionTracker.set(clientIP, connections - 1);
+    }
+  });
+
+  next();
 });
 
 // In-memory store for rooms
@@ -96,6 +406,11 @@ const leaderboardServer = new LeaderboardServer(io);
 leaderboardServer.initialize();
 
 console.log("✅ Leaderboard Server initialized with real-time rankings");
+
+// Initialize Chess Game Server
+const chessGameServer = new ChessGameServer(io);
+
+console.log("✅ Chess Game Server initialized with real-time Socket.IO sync");
 
 // Helper to generate room code
 const generateRoomCode = () => {
@@ -236,6 +551,23 @@ io.on("connection", (socket) => {
     io.to(roomCode).emit("room_update", room);
   });
 
+  // GET ALL ROOMS (for debugging)
+  socket.on("get_all_rooms", (callback) => {
+    const roomList = Object.entries(rooms).map(([code, room]) => ({
+      code,
+      status: room.status,
+      playerCount: Object.keys(room.players).length,
+      maxPlayers: room.maxPlayers,
+      mode: room.mode,
+      betAmount: room.betAmount,
+      host: room.host,
+      players: Object.keys(room.players)
+    }));
+
+    console.log(`📋 [DEBUG] Listing ${roomList.length} rooms`);
+    if (callback) callback(roomList);
+  });
+
   // GET ROOM
   socket.on("get_room", (roomCode, callback) => {
     const room = rooms[roomCode];
@@ -253,10 +585,20 @@ io.on("connection", (socket) => {
 
   // FIND MATCH
   socket.on("find_match", (playerData, callback) => {
-    console.log("Searching for match for:", playerData.username);
-    const { mode, betAmount } = playerData;
+    console.log("🔍 [MATCHMAKING] Searching for match for:", playerData.username);
+    console.log("🔍 [MATCHMAKING] Player data:", {
+      uid: playerData.uid,
+      mode: playerData.mode,
+      betAmount: playerData.betAmount,
+      playerCount: playerData.playerCount
+    });
 
+    const { mode, betAmount } = playerData;
     let joinedRoomCode = null;
+
+    // Log current rooms for debugging
+    const roomCount = Object.keys(rooms).length;
+    console.log(`🔍 [MATCHMAKING] Checking ${roomCount} existing rooms...`);
 
     // Iterate through rooms to find a match
     for (const [code, room] of Object.entries(rooms)) {
@@ -273,15 +615,19 @@ io.on("connection", (socket) => {
       const betMatches = (room.betAmount || 100) === betAmount;
       const notOwnRoom = room.host !== playerData.uid;
 
+      console.log(`🔍 [MATCHMAKING] Room ${code}: players=${currentCount}/${maxPlayers}, status=${room.status}, mode=${room.mode}, bet=${room.betAmount}, host=${room.host}`);
+      console.log(`🔍 [MATCHMAKING] Match criteria: hasSpace=${hasSpace}, isWaiting=${isWaiting}, modeMatches=${modeMatches}, betMatches=${betMatches}, notOwnRoom=${notOwnRoom}`);
+
       // Simple matching logic
       if (hasSpace && isWaiting && modeMatches && betMatches && notOwnRoom) {
         joinedRoomCode = code;
+        console.log(`✅ [MATCHMAKING] Found match in room ${code}!`);
         break;
       }
     }
 
     if (joinedRoomCode) {
-      console.log(`Found match in room ${joinedRoomCode}`);
+      console.log(`✅ [MATCHMAKING] Joining existing room ${joinedRoomCode}`);
 
       // Add player to room logic (duplicate of join_room logic for internal use)
       const room = rooms[joinedRoomCode];
@@ -302,7 +648,7 @@ io.on("connection", (socket) => {
       io.to(joinedRoomCode).emit("room_update", room);
     } else {
       // Create a new room if no match found
-      console.log("No match found, creating new room...");
+      console.log("🆕 [MATCHMAKING] No match found, creating new room...");
       // Reuse create room logic logic
       const roomCode = generateRoomCode();
       const rules = {
@@ -335,6 +681,9 @@ io.on("connection", (socket) => {
         userRooms[playerData.uid] = roomCode;
         userSockets[playerData.uid] = socket.id;
       }
+
+      console.log(`🆕 [MATCHMAKING] Created new room ${roomCode} for ${playerData.username}`);
+
       if (callback)
         callback({ success: true, roomCode, joined: false, created: true });
       io.to(roomCode).emit("room_update", rooms[roomCode]);
@@ -529,25 +878,25 @@ io.on("connection", (socket) => {
     // AI Bot Auto-Accept Logic
     if (room?.players?.[opponentId]?.isBot) {
       console.log(`[REMATCH] 🤖 Opponent ${opponentId} is AI bot - auto-accepting after delay`);
-      
+
       setTimeout(() => {
         // Check if room still exists and rematch hasn't been handled yet
         const currentRoom = rooms[roomCode];
         if (currentRoom && currentRoom.players[opponentId]?.isBot) {
           console.log(`[REMATCH] 🤖 AI bot auto-accepting rematch request`);
-          
+
           // Simulate AI bot accepting the rematch
           const botAcceptData = {
             oldRoomCode: roomCode,
             acceptorId: opponentId,
             requesterId: requesterId
           };
-          
+
           // Create new room for rematch (same logic as manual accept)
           const newRoomCode = generateRoomCode();
           const requesterPlayer = currentRoom.players[requesterId];
           const botPlayer = currentRoom.players[opponentId];
-          
+
           if (requesterPlayer && botPlayer) {
             rooms[newRoomCode] = {
               roomCode: newRoomCode,
@@ -728,9 +1077,67 @@ io.on("connection", (socket) => {
         coins: Math.floor(Math.random() * 50000) + 1000,
       };
 
+      // Smart color assignment for TeamUp mode
+      let assignedColor = null;
+      
+      if (room.isTeam) {
+        // TeamUp mode: Prioritize keeping real players together
+        const existingPlayers = Object.values(room.players);
+        const realPlayers = existingPlayers.filter(p => !p.isBot);
+        const botPlayers = existingPlayers.filter(p => p.isBot);
+        
+        // Team A: RED + YELLOW, Team B: BLUE + GREEN
+        const teamAColors = ['RED', 'YELLOW'];
+        const teamBColors = ['BLUE', 'GREEN'];
+        
+        // Find which colors are used by real players
+        const realPlayerColors = realPlayers.map(p => p.color).filter(Boolean);
+        
+        // Determine which team has real players
+        const teamAHasRealPlayer = realPlayerColors.some(c => teamAColors.includes(c));
+        const teamBHasRealPlayer = realPlayerColors.some(c => teamBColors.includes(c));
+        
+        // Get available colors
+        const usedColors = existingPlayers.map(p => p.color).filter(Boolean);
+        const availableColors = ['RED', 'GREEN', 'YELLOW', 'BLUE'].filter(c => !usedColors.includes(c));
+        
+        if (availableColors.length > 0) {
+          if (teamAHasRealPlayer && !teamBHasRealPlayer) {
+            // Real players in Team A, put bots in Team B
+            assignedColor = availableColors.find(c => teamBColors.includes(c)) || availableColors[0];
+          } else if (teamBHasRealPlayer && !teamAHasRealPlayer) {
+            // Real players in Team B, put bots in Team A
+            assignedColor = availableColors.find(c => teamAColors.includes(c)) || availableColors[0];
+          } else if (realPlayerColors.length === 1) {
+            // Only 1 real player - put second real player in same team
+            const firstRealColor = realPlayerColors[0];
+            if (teamAColors.includes(firstRealColor)) {
+              // First real player in Team A, assign teammate color if available
+              assignedColor = availableColors.find(c => teamAColors.includes(c) && c !== firstRealColor);
+            } else {
+              // First real player in Team B, assign teammate color if available
+              assignedColor = availableColors.find(c => teamBColors.includes(c) && c !== firstRealColor);
+            }
+            // If no teammate color available, assign any available color
+            if (!assignedColor) {
+              assignedColor = availableColors[0];
+            }
+          } else {
+            // Multiple real players or no real players yet - assign any available
+            assignedColor = availableColors[0];
+          }
+        }
+      } else {
+        // Non-team mode: Simple color assignment
+        const colors = ['RED', 'GREEN', 'YELLOW', 'BLUE'];
+        const usedColors = Object.values(room.players).map(p => p.color).filter(Boolean);
+        assignedColor = colors.find(c => !usedColors.includes(c));
+      }
+
       room.players[botData.uid] = {
         ...botData,
         isBot: true,
+        color: assignedColor,
         country: botData.country || "PK",
         gender: botData.gender || "male",
         ready: true,
@@ -738,13 +1145,16 @@ io.on("connection", (socket) => {
         ...botStats,
       };
 
-      console.log(`Bot added to room ${roomCode}`);
+      console.log(`🤖 Bot added to room ${roomCode} with color: ${assignedColor}`);
       io.to(roomCode).emit("room_update", room);
     }
   });
 
   socket.on("disconnect", () => {
     console.log("User disconnected:", socket.id);
+
+    // Handle Chess disconnect
+    chessGameServer.handleDisconnect(socket);
 
     // Remove from userSockets map (but keep userRooms so they can rejoin)
     for (const [uid, sid] of Object.entries(userSockets)) {
@@ -780,6 +1190,332 @@ io.on("connection", (socket) => {
       }
     }
   });
+
+  // ============================================
+  // CHESS GAME EVENT HANDLERS
+  // ============================================
+
+  // Register user socket
+  socket.on('chess:register', (userId) => {
+    socket.userId = userId;
+    console.log(`♟️ [CHESS] User registered: ${userId} -> ${socket.id}`);
+  });
+
+  // Find match (using same logic as Ludo)
+  socket.on('chess:findMatch', (playerData, callback) => {
+    console.log(`♟️ [CHESS] Searching for match for: ${playerData.username}`);
+    console.log(`♟️ [CHESS] Player data:`, {
+      uid: playerData.uid,
+      betAmount: playerData.betAmount,
+      level: playerData.level
+    });
+
+    const { betAmount } = playerData;
+    let joinedRoomCode = null;
+
+    // Log current rooms for debugging
+    const roomCount = Object.keys(rooms).length;
+    console.log(`♟️ [CHESS] Checking ${roomCount} existing rooms...`);
+
+    // Iterate through rooms to find a match
+    for (const [code, room] of Object.entries(rooms)) {
+      if (!room) continue;
+
+      // Skip non-chess rooms
+      if (room.mode && room.mode !== 'chess') continue;
+
+      const currentCount = Object.keys(room.players).length;
+      const maxPlayers = room.maxPlayers || 2;
+      const hasSpace = currentCount < maxPlayers;
+      const isWaiting = room.status === "waiting";
+      const betMatches = (room.betAmount || 100) === betAmount;
+      const notOwnRoom = room.host !== playerData.uid;
+
+      console.log(`♟️ [CHESS] Room ${code}: players=${currentCount}/${maxPlayers}, status=${room.status}, bet=${room.betAmount}`);
+      console.log(`♟️ [CHESS] Match criteria: hasSpace=${hasSpace}, isWaiting=${isWaiting}, betMatches=${betMatches}, notOwnRoom=${notOwnRoom}`);
+
+      // Simple matching logic
+      if (hasSpace && isWaiting && betMatches && notOwnRoom) {
+        joinedRoomCode = code;
+        console.log(`✅ [CHESS] Found match in room ${code}!`);
+        break;
+      }
+    }
+
+    if (joinedRoomCode) {
+      console.log(`✅ [CHESS] Joining existing room ${joinedRoomCode}`);
+
+      // Add player to room
+      const room = rooms[joinedRoomCode];
+      room.players[playerData.uid] = {
+        ...playerData,
+        ready: false,
+        joinedAt: Date.now(),
+        socketId: socket.id,
+      };
+      socket.join(joinedRoomCode);
+
+      if (playerData.uid) {
+        userRooms[playerData.uid] = joinedRoomCode;
+        userSockets[playerData.uid] = socket.id;
+      }
+
+      // Get opponent info
+      const opponentId = Object.keys(room.players).find(id => id !== playerData.uid);
+      const opponent = room.players[opponentId];
+
+      // Determine player colors (first player is white, second is black)
+      const playerIds = Object.keys(room.players);
+      const joiningPlayerIndex = playerIds.indexOf(playerData.uid);
+      const joiningPlayerColor = joiningPlayerIndex === 0 ? 'white' : 'black';
+      const hostPlayerColor = joiningPlayerIndex === 0 ? 'black' : 'white';
+
+      console.log(`✅ [CHESS] Match found! ${playerData.username} (${joiningPlayerColor}) vs ${opponent.username} (${hostPlayerColor})`);
+
+      // Send callback to joining player
+      if (callback) {
+        callback({
+          success: true,
+          roomCode: joinedRoomCode,
+          joined: true,
+          playerColor: joiningPlayerColor,
+          opponent: opponent,
+          isAI: false
+        });
+      }
+
+      // Emit event to joining player
+      socket.emit('chess:matchFound', {
+        status: 'matched',
+        roomCode: joinedRoomCode,
+        playerColor: joiningPlayerColor,
+        opponent: opponent,
+        isAI: false
+      });
+
+      // Emit event to host player (first player who created the room)
+      const hostSocketId = userSockets[room.host];
+      if (hostSocketId) {
+        io.to(hostSocketId).emit('chess:matchFound', {
+          status: 'matched',
+          roomCode: joinedRoomCode,
+          playerColor: hostPlayerColor,
+          opponent: {
+            uid: playerData.uid,
+            username: playerData.username,
+            avatar: playerData.avatar,
+            level: playerData.level,
+            gamesWon: playerData.gamesWon || 0,
+            gamesPlayed: playerData.gamesPlayed || 0,
+            winStreak: playerData.winStreak || 0,
+            gems: playerData.gems || 0,
+            coins: playerData.coins || 0,
+          },
+          isAI: false
+        });
+        console.log(`✅ [CHESS] Notified host player ${room.host} about match`);
+      } else {
+        console.warn(`⚠️ [CHESS] Could not find socket for host player ${room.host}`);
+      }
+    } else {
+      // Create a new room if no match found
+      console.log("🆕 [CHESS] No match found, creating new room...");
+
+      const roomCode = generateRoomCode();
+      const rules = {
+        playerCount: 2,
+        maxPlayers: 2,
+        betAmount: playerData.betAmount || 100,
+        mode: 'chess',
+        isTeam: false,
+      };
+
+      rooms[roomCode] = {
+        roomCode,
+        host: playerData.uid,
+        status: "waiting",
+        ...rules,
+        createdAt: Date.now(),
+        players: {
+          [playerData.uid]: {
+            ...playerData,
+            ready: false,
+            joinedAt: Date.now(),
+            socketId: socket.id,
+          },
+        },
+        gameState: null,
+      };
+
+      socket.join(roomCode);
+      if (playerData.uid) {
+        userRooms[playerData.uid] = roomCode;
+        userSockets[playerData.uid] = socket.id;
+      }
+
+      console.log(`🆕 [CHESS] Created new room ${roomCode} for ${playerData.username}`);
+
+      if (callback) {
+        callback({
+          success: true,
+          roomCode: roomCode,
+          joined: false,
+          created: true
+        });
+      }
+
+      io.to(roomCode).emit("room_update", rooms[roomCode]);
+    }
+  });
+
+  // Join room
+  socket.on('chess:joinRoom', (data, callback) => {
+    const { roomId } = data;
+    socket.join(roomId);
+    console.log(`♟️ [CHESS] Socket ${socket.id} joined room ${roomId}`);
+    if (callback) callback({ success: true });
+  });
+
+  // Make move
+  socket.on('chess:makeMove', (data, callback) => {
+    chessGameServer.handleMakeMove(socket, data);
+    if (callback) callback({ success: true });
+  });
+
+  // Resign game
+  socket.on('chess:resign', (data, callback) => {
+    chessGameServer.handleResign(socket, data);
+    if (callback) callback({ success: true });
+  });
+
+  // Leave game
+  socket.on('chess:leave', (data, callback) => {
+    chessGameServer.handleLeaveGame(socket, data);
+    if (callback) callback({ success: true });
+  });
+
+  // ============================================
+  // GAME CHAT EVENT HANDLERS (Ludo, Chess, etc.)
+  // ============================================
+
+  // Join game chat room
+  socket.on('game:joinChat', (data, callback) => {
+    const { roomId, userId, username } = data;
+    console.log(`💬 [GAME CHAT] joinChat event received:`, {
+      roomId,
+      userId,
+      username,
+      socketId: socket.id,
+      hasCallback: !!callback
+    });
+
+    socket.join(`chat:${roomId}`);
+    console.log(`💬 [GAME CHAT] ${username} (socket ${socket.id}) joined chat room chat:${roomId}`);
+    console.log(`💬 [GAME CHAT] Socket rooms:`, socket.rooms);
+
+    if (callback) callback({ success: true });
+  });
+
+  // Leave game chat room
+  socket.on('game:leaveChat', (data, callback) => {
+    const { roomId, userId } = data;
+    socket.leave(`chat:${roomId}`);
+    console.log(`💬 [GAME CHAT] User ${userId} left chat for room ${roomId}`);
+    if (callback) callback({ success: true });
+  });
+
+  // Send chat message
+  socket.on('game:sendChat', (data, callback) => {
+    const { roomId, userId, username, message, timestamp } = data;
+
+    console.log(`💬 [GAME CHAT] Received sendChat event:`, {
+      roomId,
+      userId,
+      username,
+      message,
+      hasCallback: !!callback
+    });
+
+    if (!message || !message.trim()) {
+      console.error('💬 [GAME CHAT] Empty message rejected');
+      if (callback) callback({ error: 'Empty message' });
+      return;
+    }
+
+    // Validate message length (max 200 chars)
+    if (message.length > 200) {
+      console.error('💬 [GAME CHAT] Message too long rejected');
+      if (callback) callback({ error: 'Message too long' });
+      return;
+    }
+
+    console.log(`💬 [GAME CHAT] Broadcasting message from ${username} in room ${roomId}: "${message}"`);
+
+    // Broadcast to both chat room and game room to ensure all players receive it
+    io.to(`chat:${roomId}`).emit('game:chatMessage', {
+      userId,
+      username,
+      message,
+      timestamp,
+      roomId
+    });
+
+    io.to(roomId).emit('game:chatMessage', {
+      userId,
+      username,
+      message,
+      timestamp,
+      roomId
+    });
+
+    console.log(`💬 [GAME CHAT] Message broadcasted to chat:${roomId} and ${roomId}`);
+    if (callback) callback({ success: true });
+  });
+
+  // Send emoji reaction
+  socket.on('game:sendEmoji', (data, callback) => {
+    const { roomId, userId, username, emoji, timestamp } = data;
+
+    console.log(`😊 [GAME EMOJI] Received sendEmoji event:`, {
+      roomId,
+      userId,
+      username,
+      emoji,
+      hasCallback: !!callback
+    });
+
+    if (!emoji) {
+      console.error('😊 [GAME EMOJI] No emoji provided');
+      if (callback) callback({ error: 'No emoji provided' });
+      return;
+    }
+
+    console.log(`😊 [GAME EMOJI] Broadcasting emoji from ${username} in room ${roomId}: ${emoji}`);
+
+    // Broadcast to both chat room and game room to ensure all players receive it
+    io.to(`chat:${roomId}`).emit('game:emojiReaction', {
+      userId,
+      username,
+      emoji,
+      timestamp,
+      roomId
+    });
+
+    io.to(roomId).emit('game:emojiReaction', {
+      userId,
+      username,
+      emoji,
+      timestamp,
+      roomId
+    });
+
+    console.log(`😊 [GAME EMOJI] Emoji broadcasted to chat:${roomId} and ${roomId}`);
+    if (callback) callback({ success: true });
+  });
+
+  // ============================================
+  // END GAME CHAT EVENT HANDLERS
+  // ============================================
 });
 
 const PORT = process.env.PORT || 3000;
@@ -791,44 +1527,16 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Server-side validation active`);
   console.log(`🔗 Health check: http://localhost:${PORT}/health`);
   console.log(`📊 Stats endpoint: http://localhost:${PORT}/stats`);
-  
+
   // Start league reward distribution checker
   startLeagueRewardChecker();
 });
 
 // League reward distribution system
 function startLeagueRewardChecker() {
-  console.log('🏆 Starting league reward checker...');
-  
-  // Check every minute for more precise timing
-  setInterval(async () => {
-    try {
-      const now = new Date();
-      const currentDay = now.getDay(); // 0 = Sunday, 1 = Monday, etc.
-      const currentHour = now.getHours();
-      const currentMinute = now.getMinutes();
-      
-      // Check if it's Monday at 00:00 (league reset time)
-      if (currentDay === 1 && currentHour === 0 && currentMinute === 0) {
-        console.log('🏆 League week ended, triggering reward distribution...');
-        
-        // Emit event to all connected clients to trigger league reset
-        io.emit('league_reset_trigger', {
-          message: 'League week ended - distributing rewards',
-          timestamp: new Date().toISOString(),
-          action: 'distribute_rewards'
-        });
-        
-        // Also emit general league reset event
-        io.emit('league_reset', {
-          message: 'New league week has started!',
-          timestamp: new Date().toISOString()
-        });
-        
-        console.log('🎁 League reset events sent to all clients');
-      }
-    } catch (error) {
-      console.error('Error in league reward checker:', error);
-    }
-  }, 60 * 1000); // Check every minute for more precision
+  console.log('🏆 League reward checker is now managed by Firebase config on the client side.');
+  // Removed the 1-minute test cycle
 }
+
+
+

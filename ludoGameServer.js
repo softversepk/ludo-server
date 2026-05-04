@@ -85,6 +85,7 @@ class LudoGameServer {
         color: playerColor,
         name: playerData.name || 'Player',
         avatar: playerData.avatar || '',
+        selectedToken: playerData.selectedToken || 'classic',
         ready: false,
         connected: true,
         lastHeartbeat: Date.now()
@@ -460,11 +461,58 @@ class LudoGameServer {
 
   /**
    * Assign player color based on available colors
+   * For TeamUp mode: Prioritize keeping real players in same team
    */
   assignPlayerColor(room) {
     const colors = ['RED', 'GREEN', 'YELLOW', 'BLUE'];
-    const usedColors = Object.values(room.players).map(p => p.color);
-    return colors.find(c => !usedColors.includes(c));
+    const usedColors = Object.values(room.players).map(p => p.color).filter(Boolean);
+    const availableColors = colors.filter(c => !usedColors.includes(c));
+    
+    if (availableColors.length === 0) {
+      return null; // No colors available
+    }
+    
+    // For non-team mode, assign sequentially
+    if (!room.isTeam) {
+      return availableColors[0];
+    }
+    
+    // TeamUp mode: Smart color assignment
+    // Team A: RED + YELLOW, Team B: BLUE + GREEN
+    const teamAColors = ['RED', 'YELLOW'];
+    const teamBColors = ['BLUE', 'GREEN'];
+    
+    const existingPlayers = Object.values(room.players);
+    const realPlayers = existingPlayers.filter(p => !p.isBot);
+    
+    // If this is the first player, assign RED (Team A)
+    if (realPlayers.length === 0) {
+      return availableColors.includes('RED') ? 'RED' : availableColors[0];
+    }
+    
+    // If this is the second real player, put them in same team as first
+    if (realPlayers.length === 1) {
+      const firstPlayerColor = realPlayers[0].color;
+      
+      if (teamAColors.includes(firstPlayerColor)) {
+        // First player in Team A, assign other Team A color
+        const teammateColor = teamAColors.find(c => c !== firstPlayerColor && availableColors.includes(c));
+        if (teammateColor) {
+          console.log(`👥 [TEAM ASSIGNMENT] Assigning ${teammateColor} to keep real players in Team A`);
+          return teammateColor;
+        }
+      } else if (teamBColors.includes(firstPlayerColor)) {
+        // First player in Team B, assign other Team B color
+        const teammateColor = teamBColors.find(c => c !== firstPlayerColor && availableColors.includes(c));
+        if (teammateColor) {
+          console.log(`👥 [TEAM ASSIGNMENT] Assigning ${teammateColor} to keep real players in Team B`);
+          return teammateColor;
+        }
+      }
+    }
+    
+    // For 3rd and 4th players (or if teammate color not available), assign any available
+    return availableColors[0];
   }
 
   /**
@@ -484,9 +532,11 @@ class LudoGameServer {
         return;
       }
 
-      // Token on board
+      // Token on board (position here tracks steps from start 0-56)
       const newPosition = token.position + diceValue;
-      if (newPosition <= 51) {
+      
+      // Must roll exactly the number needed to finish (56 steps total)
+      if (newPosition <= 56) {
         validMoves.push(index);
       }
     });
@@ -512,9 +562,8 @@ class LudoGameServer {
     } else {
       newPosition = token.position + diceValue;
 
-      // Check if finished
-      if (newPosition >= 52) {
-        newPosition = 57; // Finished position
+      // Check if finished (exactly 56 steps)
+      if (newPosition === 56) {
         newState = TOKEN_STATE.FINISHED;
         player.finishedCount++;
       }
@@ -677,6 +726,8 @@ class LudoGameServer {
         name: player.name,
         avatar: player.avatar,
         color: player.color,
+        selectedToken: player.selectedToken || 'classic',
+        selectedDice: player.selectedDice || 'classic',
         ready: player.ready,
         connected: player.connected
       };
