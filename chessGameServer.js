@@ -33,23 +33,23 @@ class ChessGameServer {
       });
 
       // Find match
-      socket.on('chess:findMatch', (data) => {
-        this.handleFindMatch(socket, data);
+      socket.on('chess:findMatch', (data, callback) => {
+        this.handleFindMatch(socket, data, callback);
       });
 
       // Make move
-      socket.on('chess:makeMove', (data) => {
-        this.handleMakeMove(socket, data);
+      socket.on('chess:makeMove', (data, callback) => {
+        this.handleMakeMove(socket, data, callback);
       });
 
       // Resign game
-      socket.on('chess:resign', (data) => {
-        this.handleResign(socket, data);
+      socket.on('chess:resign', (data, callback) => {
+        this.handleResign(socket, data, callback);
       });
 
       // Leave game
-      socket.on('chess:leave', (data) => {
-        this.handleLeaveGame(socket, data);
+      socket.on('chess:leave', (data, callback) => {
+        this.handleLeaveGame(socket, data, callback);
       });
 
       // Disconnect
@@ -59,7 +59,7 @@ class ChessGameServer {
     });
   }
 
-  handleFindMatch(socket, data) {
+  handleFindMatch(socket, data, callback) {
     const { userId, username, avatar, level, betAmount } = data;
 
     console.log(`♟️ [CHESS] ${username} searching for match (bet: ${betAmount})`);
@@ -68,6 +68,7 @@ class ChessGameServer {
     // Check if player is already in queue
     if (this.matchmakingQueue.has(userId)) {
       console.log(`♟️ [CHESS] Player already in queue: ${userId}`);
+      if (callback) callback({ success: true, created: false, joined: false });
       return;
     }
 
@@ -91,6 +92,9 @@ class ChessGameServer {
     if (match) {
       console.log(`♟️ [CHESS] Match found immediately!`);
       this.createGame(userId, match.userId, betAmount);
+      // Callback is optional, but since game is created and emitted, we don't strictly need it to trigger navigation,
+      // but let's call it just in case the client relies on it for UI updates.
+      if (callback) callback({ success: true, joined: true });
     } else {
       console.log(`♟️ [CHESS] No match found yet. Waiting for opponent...`);
       
@@ -99,6 +103,7 @@ class ChessGameServer {
         status: 'waiting',
         message: 'Waiting for opponent...'
       });
+      if (callback) callback({ success: true, created: true, joined: false });
       
       // Set up periodic check for this player (check every 100ms for faster matching)
       const checkInterval = setInterval(() => {
@@ -350,12 +355,13 @@ class ChessGameServer {
     }
   }
 
-  handleMakeMove(socket, data) {
+  handleMakeMove(socket, data, callback) {
     const { roomId, gameState } = data;
     const game = this.activeGames.get(roomId);
 
     if (!game) {
-      socket.emit('chess:error', { message: 'Game not found' });
+      if (callback) callback({ error: 'Game not found' });
+      else socket.emit('chess:error', { message: 'Game not found' });
       return;
     }
 
@@ -371,12 +377,16 @@ class ChessGameServer {
     game.lastUpdate = Date.now();
 
     // Broadcast to both players
-    this.io.to(roomId).emit('chess:gameUpdate', {
+    // We must ensure the socket explicitly broadcasts to the room using `socket.to(roomId).emit` 
+    // or `this.io.to(roomId).emit`, since `this.io.to(roomId)` works for sending it to everyone.
+    socket.to(roomId).emit('chess:gameUpdate', {
       gameState,
       timestamp: Date.now()
     });
 
     console.log(`♟️ [CHESS] Move in ${roomId}: ${gameState.lastMove?.from} -> ${gameState.lastMove?.to}`);
+
+    if (callback) callback({ success: true });
 
     // Check for checkmate
     if (gameState.isCheckmate) {
@@ -384,12 +394,13 @@ class ChessGameServer {
     }
   }
 
-  handleResign(socket, data) {
+  handleResign(socket, data, callback) {
     const { roomId, resigningPlayerId, betAmount } = data;
     const game = this.activeGames.get(roomId);
 
     if (!game) {
-      socket.emit('chess:error', { message: 'Game not found' });
+      if (callback) callback({ error: 'Game not found' });
+      else socket.emit('chess:error', { message: 'Game not found' });
       return;
     }
 
@@ -408,13 +419,18 @@ class ChessGameServer {
     // Clean up game
     this.activeGames.delete(roomId);
     console.log(`♟️ [CHESS] Game ${roomId} ended by resignation`);
+
+    if (callback) callback({ success: true });
   }
 
-  handleLeaveGame(socket, data) {
+  handleLeaveGame(socket, data, callback) {
     const { roomId, playerId, betAmount } = data;
     const game = this.activeGames.get(roomId);
 
-    if (!game) return;
+    if (!game) {
+      if (callback) callback({ error: 'Game not found' });
+      return;
+    }
 
     // Determine winner (opponent wins)
     const whitePlayer = game.players.white;
@@ -431,6 +447,8 @@ class ChessGameServer {
     // Clean up game
     this.activeGames.delete(roomId);
     console.log(`♟️ [CHESS] Game ${roomId} ended - player left`);
+
+    if (callback) callback({ success: true });
   }
 
   handleGameEnd(roomId, gameState) {

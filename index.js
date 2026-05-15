@@ -1,13 +1,32 @@
 const express = require("express");
 const http = require("http");
+require('dotenv').config(); // Add dotenv support for local testing
 const { Server } = require("socket.io");
 const cors = require("cors");
 const rateLimit = require("express-rate-limit");
 const helmet = require("helmet");
+const { RtcTokenBuilder, RtcRole } = require('agora-token'); // Agora Token Builder
 const LudoGameServer = require("./ludoGameServer");
 const ClubChatServer = require("./clubChatServer");
 const LeaderboardServer = require("./leaderboardServer");
 const ChessGameServer = require("./chessGameServer");
+const { processUserXP } = require('./xpService');
+const admin = require('firebase-admin');
+
+// Initialize Firebase Admin (Required for secure backend operations like XP)
+try {
+  // If you have a service account JSON file, you can initialize it like this:
+  // const serviceAccount = require('./serviceAccountKey.json');
+  // admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+  
+  // Or if using env vars (e.g. deployed on Railway/Heroku/Firebase):
+  if (!admin.apps.length) {
+    admin.initializeApp();
+    console.log("✅ Firebase Admin initialized");
+  }
+} catch (error) {
+  console.warn("⚠️ Firebase Admin initialization warning:", error.message);
+}
 
 const app = express();
 
@@ -77,6 +96,58 @@ app.get('/health', (req, res) => {
   });
 });
 
+// AGORA TOKEN GENERATION ENDPOINT
+app.get('/rtcToken', (req, res) => {
+    res.header('Cache-Control', 'private, no-cache, no-store, must-revalidate');
+    res.header('Expires', '-1');
+    res.header('Pragma', 'no-cache');
+
+    const channelName = req.query.channelName;
+    if (!channelName) {
+        return res.status(400).json({ error: 'channelName is required' });
+    }
+
+    let uid = req.query.uid;
+    if (!uid || uid === '') {
+        uid = 0; 
+    }
+
+    let role = RtcRole.SUBSCRIBER;
+    if (req.query.role === 'publisher') {
+        role = RtcRole.PUBLISHER;
+    }
+
+    let expireTime = req.query.expireTime;
+    if (!expireTime || expireTime === '') {
+        expireTime = 3600 * 24;
+    } else {
+        expireTime = parseInt(expireTime, 10);
+    }
+
+    const currentTime = Math.floor(Date.now() / 1000);
+    const privilegeExpireTime = currentTime + expireTime;
+
+    const APP_ID = process.env.AGORA_APP_ID || '4ca360f96c324fe39683d5323f279bb2';
+    const APP_CERTIFICATE = process.env.AGORA_APP_CERTIFICATE || '219a06c3b3034c079782e11cc690cf1b';
+
+    try {
+        let token;
+        if (req.query.tokentype === 'userAccount') {
+            token = RtcTokenBuilder.buildTokenWithUserAccount(
+                APP_ID, APP_CERTIFICATE, channelName, uid, role, privilegeExpireTime
+            );
+        } else {
+            token = RtcTokenBuilder.buildTokenWithUid(
+                APP_ID, APP_CERTIFICATE, channelName, uid, role, privilegeExpireTime
+            );
+        }
+        return res.json({ token: token });
+    } catch (error) {
+        console.error("Agora Token Generation Error:", error);
+        return res.status(500).json({ error: "Failed to generate token" });
+    }
+});
+
 // Server stats endpoint with authentication
 app.get('/stats', strictLimiter, (req, res) => {
   // In production, you should add authentication here
@@ -124,7 +195,86 @@ const authenticateFinancialRequest = (req, res, next) => {
   next();
 };
 
+// Update Game Stats securely on the backend
+app.post('/api/game/update-stats', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { userId, stats } = req.body;
+
+    if (!userId || !stats) {
+      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    }
+
+    if (!admin.apps.length) {
+      return res.status(503).json({ success: false, error: 'Firebase Admin not initialized' });
+    }
+
+    const db = admin.firestore();
+    const userRef = db.collection('users').doc(userId);
+    const userDoc = await userRef.get();
+
+    if (!userDoc.exists) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    const updates = {};
+    if (stats.won) {
+      updates.gamesWon = admin.firestore.FieldValue.increment(1);
+      updates.winStreak = admin.firestore.FieldValue.increment(1);
+    } else if (stats.played && stats.won === false) {
+      updates.winStreak = 0;
+    }
+    
+    if (stats.played) updates.gamesPlayed = admin.firestore.FieldValue.increment(1);
+    if (stats.kills) updates.tokensKilled = admin.firestore.FieldValue.increment(stats.kills);
+
+    if (Object.keys(updates).length > 0) {
+      await userRef.update(updates);
+    }
+
+    // Fetch the updated doc to return the new values
+    const updatedDoc = await userRef.get();
+    
+    res.json({
+      success: true,
+      stats: {
+        gamesWon: updatedDoc.data().gamesWon,
+        gamesPlayed: updatedDoc.data().gamesPlayed,
+        tokensKilled: updatedDoc.data().tokensKilled,
+        winStreak: updatedDoc.data().winStreak
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ [SERVER-STATS] Error updating stats:', error);
+    res.status(500).json({ success: false, error: 'Server validation failed' });
+  }
+});
+
 // Validate game win and award rewards
+app.post('/api/game/award-xp', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { userId, action } = req.body;
+    if (!userId || !action) {
+      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    }
+
+    if (!admin.apps.length) {
+      return res.status(503).json({ success: false, error: 'Firebase Admin not initialized' });
+    }
+
+    const xpResult = await processUserXP(userId, action);
+    
+    if (xpResult.success) {
+      res.json(xpResult);
+    } else {
+      res.status(400).json(xpResult);
+    }
+  } catch (error) {
+    console.error('❌ [SERVER-XP] Error awarding XP:', error);
+    res.status(500).json({ success: false, error: 'Server validation failed' });
+  }
+});
+
 app.post('/api/game/validate-win', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { userId, gameType, betAmount, gameData } = req.body;
@@ -159,6 +309,19 @@ app.post('/api/game/validate-win', strictLimiter, authenticateFinancialRequest, 
     });
 
     // TODO: Update Firebase database with server admin credentials
+    // Process XP for Match Win
+    let xpResult = null;
+    try {
+      if (admin.apps.length) {
+        xpResult = await processUserXP(userId, 'match_win');
+        console.log('🏆 [SERVER-XP] Match win XP processed:', xpResult);
+      } else {
+        console.warn('⚠️ [SERVER-XP] Firebase Admin not initialized, skipping XP processing.');
+      }
+    } catch (e) {
+      console.error('❌ [SERVER-XP] Error processing XP:', e);
+    }
+
     // For now, return calculated rewards for client to display
     res.json({
       success: true,
@@ -166,6 +329,7 @@ app.post('/api/game/validate-win', strictLimiter, authenticateFinancialRequest, 
         coins: coinReward,
         clubPoints: clubPointReward
       },
+      xp: xpResult,
       validated: true,
       timestamp: new Date().toISOString()
     });
@@ -455,6 +619,7 @@ io.on("connection", (socket) => {
       betAmount: hostData.betAmount || 100,
       mode: hostData.mode || "online_random",
       isTeam: hostData.isTeam || false,
+      gameMode: hostData.gameMode || "classic",
     };
 
     rooms[roomCode] = {
@@ -587,10 +752,14 @@ io.on("connection", (socket) => {
       const maxPlayers = room.maxPlayers;
       const hasSpace = currentCount < maxPlayers;
       const isWaiting = room.status === "waiting";
+      
+      // Allow tictactoe and tournament modes to match properly
       const modeMatches =
         !room.mode ||
         room.mode === mode ||
-        (mode === "tictactoe" && room.mode === "tictactoe");
+        (mode === "tictactoe" && room.mode === "tictactoe") ||
+        (mode === "tournament" && room.mode === "tournament");
+        
       const betMatches = (room.betAmount || 100) === betAmount;
       const notOwnRoom = room.host !== playerData.uid;
 
@@ -630,12 +799,19 @@ io.on("connection", (socket) => {
       console.log("🆕 [MATCHMAKING] No match found, creating new room...");
       // Reuse create room logic logic
       const roomCode = generateRoomCode();
+      
+      // Determine max players based on mode
+      let defaultMaxPlayers = 2;
+      if (playerData.mode === "tournament") defaultMaxPlayers = 4; // Tournaments have 4 players per match
+      else if (playerData.playerCount) defaultMaxPlayers = playerData.playerCount;
+      
       const rules = {
-        playerCount: playerData.playerCount || 2, // Default for matchmaking usually 2 or 4
-        maxPlayers: playerData.playerCount || playerData.maxPlayers || 2,
+        playerCount: playerData.playerCount || defaultMaxPlayers,
+        maxPlayers: playerData.maxPlayers || defaultMaxPlayers,
         betAmount: playerData.betAmount || 100,
         mode: playerData.mode || "online_random",
         isTeam: playerData.isTeam || false,
+        gameMode: playerData.gameMode || "classic",
       };
 
       rooms[roomCode] = {
@@ -762,12 +938,13 @@ io.on("connection", (socket) => {
   });
 
   // SNAKE TURN (Optimized for Snake Vs Snake)
-  socket.on("snake_turn", ({ roomCode, playerKey, angle }) => {
+  socket.on("snake_turn", (data) => {
+    const { roomCode, playerKey, angle } = data;
     const room = rooms[roomCode];
     if (room && room.gameState && room.gameState.snakes) {
-      room.gameState.snakes[playerKey].angle = angle;
+      if (angle !== undefined) room.gameState.snakes[playerKey].angle = angle;
       // Broadcast steering to the other player
-      socket.to(roomCode).emit("snake_turn", { playerKey, angle });
+      socket.to(roomCode).emit("snake_turn", data);
     }
   });
 
@@ -1168,209 +1345,6 @@ io.on("connection", (socket) => {
         io.to(code).emit("room_update", room);
       }
     }
-  });
-
-  // ============================================
-  // CHESS GAME EVENT HANDLERS
-  // ============================================
-
-  // Register user socket
-  socket.on('chess:register', (userId) => {
-    socket.userId = userId;
-    console.log(`♟️ [CHESS] User registered: ${userId} -> ${socket.id}`);
-  });
-
-  // Find match (using same logic as Ludo)
-  socket.on('chess:findMatch', (playerData, callback) => {
-    console.log(`♟️ [CHESS] Searching for match for: ${playerData.username}`);
-    console.log(`♟️ [CHESS] Player data:`, {
-      uid: playerData.uid,
-      betAmount: playerData.betAmount,
-      level: playerData.level
-    });
-
-    const { betAmount } = playerData;
-    let joinedRoomCode = null;
-
-    // Log current rooms for debugging
-    const roomCount = Object.keys(rooms).length;
-    console.log(`♟️ [CHESS] Checking ${roomCount} existing rooms...`);
-
-    // Iterate through rooms to find a match
-    for (const [code, room] of Object.entries(rooms)) {
-      if (!room) continue;
-
-      // Skip non-chess rooms
-      if (room.mode && room.mode !== 'chess') continue;
-
-      const currentCount = Object.keys(room.players).length;
-      const maxPlayers = room.maxPlayers || 2;
-      const hasSpace = currentCount < maxPlayers;
-      const isWaiting = room.status === "waiting";
-      const betMatches = (room.betAmount || 100) === betAmount;
-      const notOwnRoom = room.host !== playerData.uid;
-
-      console.log(`♟️ [CHESS] Room ${code}: players=${currentCount}/${maxPlayers}, status=${room.status}, bet=${room.betAmount}`);
-      console.log(`♟️ [CHESS] Match criteria: hasSpace=${hasSpace}, isWaiting=${isWaiting}, betMatches=${betMatches}, notOwnRoom=${notOwnRoom}`);
-
-      // Simple matching logic
-      if (hasSpace && isWaiting && betMatches && notOwnRoom) {
-        joinedRoomCode = code;
-        console.log(`✅ [CHESS] Found match in room ${code}!`);
-        break;
-      }
-    }
-
-    if (joinedRoomCode) {
-      console.log(`✅ [CHESS] Joining existing room ${joinedRoomCode}`);
-
-      // Add player to room
-      const room = rooms[joinedRoomCode];
-      room.players[playerData.uid] = {
-        ...playerData,
-        ready: false,
-        joinedAt: Date.now(),
-        socketId: socket.id,
-      };
-      socket.join(joinedRoomCode);
-
-      if (playerData.uid) {
-        userRooms[playerData.uid] = joinedRoomCode;
-        userSockets[playerData.uid] = socket.id;
-      }
-
-      // Get opponent info
-      const opponentId = Object.keys(room.players).find(id => id !== playerData.uid);
-      const opponent = room.players[opponentId];
-
-      // Determine player colors (first player is white, second is black)
-      const playerIds = Object.keys(room.players);
-      const joiningPlayerIndex = playerIds.indexOf(playerData.uid);
-      const joiningPlayerColor = joiningPlayerIndex === 0 ? 'white' : 'black';
-      const hostPlayerColor = joiningPlayerIndex === 0 ? 'black' : 'white';
-
-      console.log(`✅ [CHESS] Match found! ${playerData.username} (${joiningPlayerColor}) vs ${opponent.username} (${hostPlayerColor})`);
-
-      // Send callback to joining player
-      if (callback) {
-        callback({
-          success: true,
-          roomCode: joinedRoomCode,
-          joined: true,
-          playerColor: joiningPlayerColor,
-          opponent: opponent,
-          isAI: false
-        });
-      }
-
-      // Emit event to joining player
-      socket.emit('chess:matchFound', {
-        status: 'matched',
-        roomCode: joinedRoomCode,
-        playerColor: joiningPlayerColor,
-        opponent: opponent,
-        isAI: false
-      });
-
-      // Emit event to host player (first player who created the room)
-      const hostSocketId = userSockets[room.host];
-      if (hostSocketId) {
-        io.to(hostSocketId).emit('chess:matchFound', {
-          status: 'matched',
-          roomCode: joinedRoomCode,
-          playerColor: hostPlayerColor,
-          opponent: {
-            uid: playerData.uid,
-            username: playerData.username,
-            avatar: playerData.avatar,
-            level: playerData.level,
-            gamesWon: playerData.gamesWon || 0,
-            gamesPlayed: playerData.gamesPlayed || 0,
-            winStreak: playerData.winStreak || 0,
-            gems: playerData.gems || 0,
-            coins: playerData.coins || 0,
-          },
-          isAI: false
-        });
-        console.log(`✅ [CHESS] Notified host player ${room.host} about match`);
-      } else {
-        console.warn(`⚠️ [CHESS] Could not find socket for host player ${room.host}`);
-      }
-    } else {
-      // Create a new room if no match found
-      console.log("🆕 [CHESS] No match found, creating new room...");
-
-      const roomCode = generateRoomCode();
-      const rules = {
-        playerCount: 2,
-        maxPlayers: 2,
-        betAmount: playerData.betAmount || 100,
-        mode: 'chess',
-        isTeam: false,
-      };
-
-      rooms[roomCode] = {
-        roomCode,
-        host: playerData.uid,
-        status: "waiting",
-        ...rules,
-        createdAt: Date.now(),
-        players: {
-          [playerData.uid]: {
-            ...playerData,
-            ready: false,
-            joinedAt: Date.now(),
-            socketId: socket.id,
-          },
-        },
-        gameState: null,
-      };
-
-      socket.join(roomCode);
-      if (playerData.uid) {
-        userRooms[playerData.uid] = roomCode;
-        userSockets[playerData.uid] = socket.id;
-      }
-
-      console.log(`🆕 [CHESS] Created new room ${roomCode} for ${playerData.username}`);
-
-      if (callback) {
-        callback({
-          success: true,
-          roomCode: roomCode,
-          joined: false,
-          created: true
-        });
-      }
-
-      io.to(roomCode).emit("room_update", rooms[roomCode]);
-    }
-  });
-
-  // Join room
-  socket.on('chess:joinRoom', (data, callback) => {
-    const { roomId } = data;
-    socket.join(roomId);
-    console.log(`♟️ [CHESS] Socket ${socket.id} joined room ${roomId}`);
-    if (callback) callback({ success: true });
-  });
-
-  // Make move
-  socket.on('chess:makeMove', (data, callback) => {
-    chessGameServer.handleMakeMove(socket, data);
-    if (callback) callback({ success: true });
-  });
-
-  // Resign game
-  socket.on('chess:resign', (data, callback) => {
-    chessGameServer.handleResign(socket, data);
-    if (callback) callback({ success: true });
-  });
-
-  // Leave game
-  socket.on('chess:leave', (data, callback) => {
-    chessGameServer.handleLeaveGame(socket, data);
-    if (callback) callback({ success: true });
   });
 
   // ============================================

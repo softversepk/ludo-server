@@ -8,9 +8,12 @@
         "dev": "nodemon index.js"
     },
     "dependencies": {
+        "agora-token": "^2.0.5",
         "cors": "^2.8.6",
+        "dotenv": "^17.4.2",
         "express": "^4.22.1",
         "express-rate-limit": "^7.5.1",
+        "firebase-admin": "^13.9.0",
         "helmet": "^7.1.0",
         "socket.io": "^4.8.3"
     },
