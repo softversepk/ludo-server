@@ -122,14 +122,34 @@ app.post('/api/gifts/send', strictLimiter, async (req, res) => {
 
     // Transaction for secure deduction and addition
     await admin.firestore().runTransaction(async (transaction) => {
+      // We must get the recipient first if there is one to perform reads before writes
+      let recipientRef = null;
+      let recipientDoc = null;
+      
+      if (recipientId && recipientId !== 'all') {
+        recipientRef = admin.firestore().collection('users').doc(recipientId);
+        recipientDoc = await transaction.get(recipientRef);
+      }
+      
+      // Get sender in transaction
+      const tSenderDoc = await transaction.get(senderRef);
+      
+      if (!tSenderDoc.exists) {
+        throw new Error('Sender not found in transaction');
+      }
+
+      const tSenderGems = tSenderDoc.data().gems || 0;
+      if (tSenderGems < cost) {
+        throw new Error('Not enough gems during transaction');
+      }
+
       // 1. Deduct from sender
       transaction.update(senderRef, {
         gems: admin.firestore.FieldValue.increment(-cost)
       });
       
       // 2. Add to recipient if not 'all'
-      if (recipientId && recipientId !== 'all') {
-        const recipientRef = admin.firestore().collection('users').doc(recipientId);
+      if (recipientRef && recipientDoc && recipientDoc.exists) {
         transaction.update(recipientRef, {
           gems: admin.firestore.FieldValue.increment(cost)
         });
@@ -138,8 +158,8 @@ app.post('/api/gifts/send', strictLimiter, async (req, res) => {
 
     res.status(200).json({ success: true, message: 'Gift sent successfully' });
   } catch (error) {
-    console.error('Error in /api/gifts/send:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Error in /api/gifts/send:', error.message);
+    res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
 
