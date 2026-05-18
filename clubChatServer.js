@@ -38,6 +38,10 @@ class ClubChatServer {
       // Member online status
       socket.on('club:heartbeat', (data) => this.handleHeartbeat(socket, data));
 
+      // Voice chat slots
+      socket.on('club:join_voice_slot', (data) => this.handleJoinVoiceSlot(socket, data));
+      socket.on('club:leave_voice_slot', (data) => this.handleLeaveVoiceSlot(socket, data));
+
       // Disconnection
       socket.on('disconnect', () => this.handleDisconnect(socket));
     });
@@ -58,6 +62,7 @@ class ClubChatServer {
         this.clubRooms.set(clubId, {
           members: new Map(),
           messages: [],
+          voiceSlots: Array(10).fill(null),
           createdAt: Date.now()
         });
       }
@@ -92,7 +97,8 @@ class ClubChatServer {
           role: m.role,
           isOnline: m.isOnline
         })),
-        recentMessages: clubRoom.messages.slice(-50) // Last 50 messages
+        recentMessages: clubRoom.messages.slice(-50), // Last 50 messages
+        voiceSlots: clubRoom.voiceSlots
       });
 
       // Notify other members
@@ -133,6 +139,15 @@ class ClubChatServer {
           userId,
           username: member.username,
           timestamp: Date.now()
+        });
+      }
+
+      // Remove from voice slots if present
+      const slotIndex = clubRoom.voiceSlots.findIndex(slot => slot && slot.userId === userId);
+      if (slotIndex !== -1) {
+        clubRoom.voiceSlots[slotIndex] = null;
+        this.io.to(`club:${clubId}`).emit('club:voice_slots_update', {
+          voiceSlots: clubRoom.voiceSlots
         });
       }
 
@@ -308,6 +323,58 @@ class ClubChatServer {
   }
 
   /**
+   * Handle joining voice slot
+   */
+  handleJoinVoiceSlot(socket, { clubId, userId, username, avatar, slotIndex }) {
+    try {
+      const clubRoom = this.clubRooms.get(clubId);
+      if (!clubRoom) return;
+
+      // Ensure user isn't already in another slot
+      const existingSlotIndex = clubRoom.voiceSlots.findIndex(slot => slot && slot.userId === userId);
+      if (existingSlotIndex !== -1) {
+        clubRoom.voiceSlots[existingSlotIndex] = null;
+      }
+
+      // Assign to new slot
+      if (slotIndex >= 0 && slotIndex < 10) {
+        clubRoom.voiceSlots[slotIndex] = { userId, username, avatar, joinedAt: Date.now(), isMuted: false };
+      }
+
+      // Broadcast updated slots
+      this.io.to(`club:${clubId}`).emit('club:voice_slots_update', {
+        voiceSlots: clubRoom.voiceSlots
+      });
+      console.log(`🎤 [VOICE SLOT] ${username} joined slot ${slotIndex} in club ${clubId}`);
+    } catch (error) {
+      console.error('❌ [VOICE SLOT ERROR]', error);
+    }
+  }
+
+  /**
+   * Handle leaving voice slot
+   */
+  handleLeaveVoiceSlot(socket, { clubId, userId }) {
+    try {
+      const clubRoom = this.clubRooms.get(clubId);
+      if (!clubRoom) return;
+
+      const existingSlotIndex = clubRoom.voiceSlots.findIndex(slot => slot && slot.userId === userId);
+      if (existingSlotIndex !== -1) {
+        clubRoom.voiceSlots[existingSlotIndex] = null;
+        
+        // Broadcast updated slots
+        this.io.to(`club:${clubId}`).emit('club:voice_slots_update', {
+          voiceSlots: clubRoom.voiceSlots
+        });
+        console.log(`🎤 [VOICE SLOT] User ${userId} left voice slot in club ${clubId}`);
+      }
+    } catch (error) {
+      console.error('❌ [VOICE SLOT ERROR]', error);
+    }
+  }
+
+  /**
    * Handle disconnection
    */
   handleDisconnect(socket) {
@@ -334,6 +401,15 @@ class ClubChatServer {
 
         // Broadcast updated online count
         this.broadcastOnlineCount(clubId);
+
+        // Remove from voice slots if present
+        const slotIndex = clubRoom.voiceSlots.findIndex(slot => slot && slot.userId === userId);
+        if (slotIndex !== -1) {
+          clubRoom.voiceSlots[slotIndex] = null;
+          this.io.to(`club:${clubId}`).emit('club:voice_slots_update', {
+            voiceSlots: clubRoom.voiceSlots
+          });
+        }
 
         // Auto-remove after 5 minutes if not reconnected
         setTimeout(() => {
