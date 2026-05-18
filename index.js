@@ -96,6 +96,53 @@ app.get('/health', (req, res) => {
   });
 });
 
+// GIFT SENDING ENDPOINT
+app.post('/api/gifts/send', strictLimiter, async (req, res) => {
+  try {
+    const { senderId, recipientId, giftId, clubId, cost } = req.body;
+    
+    if (!senderId || !giftId || !clubId || !cost) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    // Verify sender has enough gems
+    const senderRef = admin.firestore().collection('users').doc(senderId);
+    const senderDoc = await senderRef.get();
+    
+    if (!senderDoc.exists) {
+      return res.status(404).json({ error: 'Sender not found' });
+    }
+    
+    const senderData = senderDoc.data();
+    const currentGems = senderData.gems || 0;
+    
+    if (currentGems < cost) {
+      return res.status(400).json({ error: 'Not enough gems' });
+    }
+
+    // Transaction for secure deduction and addition
+    await admin.firestore().runTransaction(async (transaction) => {
+      // 1. Deduct from sender
+      transaction.update(senderRef, {
+        gems: admin.firestore.FieldValue.increment(-cost)
+      });
+      
+      // 2. Add to recipient if not 'all'
+      if (recipientId && recipientId !== 'all') {
+        const recipientRef = admin.firestore().collection('users').doc(recipientId);
+        transaction.update(recipientRef, {
+          gems: admin.firestore.FieldValue.increment(cost)
+        });
+      }
+    });
+
+    res.status(200).json({ success: true, message: 'Gift sent successfully' });
+  } catch (error) {
+    console.error('Error in /api/gifts/send:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // AGORA TOKEN GENERATION ENDPOINT
 app.get('/rtcToken', (req, res) => {
     res.header('Cache-Control', 'private, no-cache, no-store, must-revalidate');
