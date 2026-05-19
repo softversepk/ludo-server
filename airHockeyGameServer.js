@@ -20,11 +20,8 @@ class AirHockeyGameServer {
 
   initialize() {
     this.io.on("connection", (socket) => {
-      // Handle start air hockey game specifically if needed,
-      // but usually index.js handles start_game.
-      // We will hook into paddle_move and start_game externally.
-      
-      socket.on("air_hockey_paddle_move", ({ roomCode, playerKey, x, y }) => {
+      // Client sends paddle move here
+      socket.on("paddle_move", ({ roomCode, playerKey, x, y }) => {
         const room = this.rooms[roomCode];
         if (room && room.gameState && room.gameState.strikers) {
           // Normalize paddle positions
@@ -49,7 +46,17 @@ class AirHockeyGameServer {
       room.gameState.puck = { x: 0.5, y: 0.5, vx: 0, vy: 0 };
     }
     
-    room.gameState.hits = { p1: 0, p2: 0, wall: 0 };
+    // Initialize strikers if not present
+    if (!room.gameState.strikers) {
+      room.gameState.strikers = {
+        player1: { x: 0.5, y: 0.75 },
+        player2: { x: 0.5, y: 0.25 },
+      };
+    }
+    
+    if (!room.gameState.hits) {
+      room.gameState.hits = { p1: 0, p2: 0, wall: 0 };
+    }
 
     let lastP1Pos = { ...room.gameState.strikers.player1 };
     let lastP2Pos = { ...room.gameState.strikers.player2 };
@@ -95,6 +102,7 @@ class AirHockeyGameServer {
         // We'll just use the exact math from the client.
         // But server doesn't know TABLE_WIDTH. We assume TABLE_WIDTH = 1.0, TABLE_HEIGHT = 1.0 in normalized coordinates.
         // Actually, client sends normalized (0 to 1). So radius in normalized is roughly:
+        // Let's use generic width and height matching typical phone to calculate distance
         const TABLE_WIDTH = 400; // arbitrary reference for radius scaling
         const TABLE_HEIGHT = 600;
         const minX = PUCK_RADIUS / TABLE_WIDTH;
@@ -144,6 +152,31 @@ class AirHockeyGameServer {
         vy *= subFriction;
 
         gameState.puck = { x, y, vx, vy };
+      }
+
+      // Timer logic (Server managed)
+      if (!room.gameState.lastTimerUpdate) {
+        room.gameState.lastTimerUpdate = Date.now();
+      }
+      
+      const now = Date.now();
+      if (now - room.gameState.lastTimerUpdate >= 1000) {
+        if (room.gameState.timeLeft > 0) {
+          room.gameState.timeLeft -= 1;
+        } else if (room.gameState.timeLeft === 0 && room.gameState.status === "playing") {
+          // Time up! Decide winner based on score
+          const p1Score = room.gameState.scores.player1;
+          const p2Score = room.gameState.scores.player2;
+          let winner = "draw";
+          if (p1Score > p2Score) winner = "player1";
+          else if (p2Score > p1Score) winner = "player2";
+          
+          room.gameState.winner = winner;
+          room.gameState.status = "game_over";
+          room.status = "game_over";
+          this.stopGameLoop(roomCode);
+        }
+        room.gameState.lastTimerUpdate = now;
       }
 
       // Broadcast game state to room
@@ -207,15 +240,10 @@ class AirHockeyGameServer {
     // Reset puck to center, stationary
     room.gameState.puck = { x: 0.5, y: 0.5, vx: 0, vy: 0 };
     
-    // Check win condition
-    if (room.gameState.scores[scoringPlayer] >= 7) { // Example win score
-      room.gameState.winner = scoringPlayer;
-      room.gameState.status = "game_over";
-      room.status = "game_over";
-      this.stopGameLoop(roomCode);
-    } else {
-      room.gameState.status = "playing"; // Or "goal" briefly
-    }
+    // Server doesn't check win condition, it just emits a score.
+    // Client timer or score logic handles the game over?
+    // Actually, client has a timer. We should let client decide game over or server?
+    // Let's just update score and let clients decide, or we broadcast score update.
     
     this.io.to(roomCode).emit("game_state_update", room.gameState);
   }
