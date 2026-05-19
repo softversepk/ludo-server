@@ -60,6 +60,7 @@ class AirHockeyGameServer {
 
     let lastP1Pos = { ...room.gameState.strikers.player1 };
     let lastP2Pos = { ...room.gameState.strikers.player2 };
+    let broadcastCounter = 0;
 
     const loop = setInterval(() => {
       if (!this.rooms[roomCode] || this.rooms[roomCode].status !== "playing") {
@@ -187,8 +188,11 @@ class AirHockeyGameServer {
         room.gameState.lastTimerUpdate = now;
       }
 
-      // Broadcast game state to room
-      this.io.to(roomCode).emit("game_state_update", gameState);
+      // Broadcast game state to room at 30 FPS instead of 60 FPS to prevent polling network overflow
+      broadcastCounter++;
+      if (broadcastCounter % 2 === 0) {
+        this.io.to(roomCode).emit("game_state_update", gameState);
+      }
 
     }, INTERVAL_MS);
 
