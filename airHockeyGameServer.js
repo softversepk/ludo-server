@@ -207,7 +207,6 @@ class AirHockeyGameServer {
   }
 
   checkPaddleCollision(paddle, puck, paddleVel, powerMultiplier, TABLE_WIDTH, TABLE_HEIGHT) {
-    // Math matching client side
     // Both paddle and puck are in normalized coordinates (0 to 1)
     const dx = (puck.x - paddle.x) * TABLE_WIDTH;
     const dy = (puck.y - paddle.y) * TABLE_HEIGHT;
@@ -220,29 +219,52 @@ class AirHockeyGameServer {
       const nx = dx / distance;
       const ny = dy / distance;
 
+      // Position Resolution: ALWAYS push puck out of paddle to resolve overlap immediately
+      const newX = paddle.x + nx * ((minDistance + 2) / TABLE_WIDTH);
+      const newY = paddle.y + ny * ((minDistance + 2) / TABLE_HEIGHT);
+
       const relVx = puck.vx - (paddleVel.x * powerMultiplier);
       const relVy = puck.vy - (paddleVel.y * powerMultiplier);
 
       const velAlongNormal = relVx * nx + relVy * ny;
 
-      // Ensure we push the puck out even if it's slightly moving away but still overlapping
-      // This prevents tunneling completely
-      if (velAlongNormal < 0 || distance < minDistance * 0.9) {
-        const restitution = 0.8; // Bounciness
-        const impulse = -(1 + restitution) * Math.min(velAlongNormal, 0); // Don't apply negative impulse if moving away
-
-        const pushFactor = (minDistance - distance) / minDistance;
-        const baseHitVelocity = 0.015;
-
+      // If puck is already moving away from paddle center and safely outside inner overlap, don't reflect back into it
+      if (velAlongNormal > 0 && distance > minDistance * 0.9) {
         return {
           hit: true,
-          // Push slightly further out to ensure it escapes the collision zone in the next frame
-          x: paddle.x + nx * ((minDistance + 2) / TABLE_WIDTH),
-          y: paddle.y + ny * ((minDistance + 2) / TABLE_HEIGHT),
-          vx: puck.vx + nx * impulse + nx * pushFactor * baseHitVelocity,
-          vy: puck.vy + ny * impulse + ny * pushFactor * baseHitVelocity
+          x: newX,
+          y: newY,
+          vx: puck.vx,
+          vy: puck.vy
         };
       }
+
+      // Restitution (bounciness) and impulse
+      const restitution = 0.8;
+      const impulse = -(1 + restitution) * velAlongNormal;
+
+      // Add momentum from the paddle hit
+      const pushFactor = (minDistance - distance) / minDistance;
+      const baseHitVelocity = 0.015;
+
+      let newVx = puck.vx + nx * impulse + nx * pushFactor * baseHitVelocity;
+      let newVy = puck.vy + ny * impulse + ny * pushFactor * baseHitVelocity;
+
+      // Clamp speed to prevent extreme velocities (matching client MAX_SPEED_NORMALIZED = 0.06)
+      const speed = Math.sqrt(newVx * newVx + newVy * newVy);
+      const MAX_SPEED_NORMALIZED = 0.06;
+      if (speed > MAX_SPEED_NORMALIZED) {
+        newVx = (newVx / speed) * MAX_SPEED_NORMALIZED;
+        newVy = (newVy / speed) * MAX_SPEED_NORMALIZED;
+      }
+
+      return {
+        hit: true,
+        x: newX,
+        y: newY,
+        vx: newVx,
+        vy: newVy
+      };
     }
     return { hit: false };
   }
