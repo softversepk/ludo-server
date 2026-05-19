@@ -593,7 +593,7 @@ const roomDeleteTimers = {};
 const scheduleRoomDelete = (roomCode, delayMs = 30000) => {
   if (roomDeleteTimers[roomCode]) clearTimeout(roomDeleteTimers[roomCode]);
   roomDeleteTimers[roomCode] = setTimeout(() => {
-    if (rooms[roomCode]?.gameState?.strikers && rooms[roomCode]?.gameState?.puck) {
+    if (rooms[roomCode]?.mode === 'air_hockey' || (rooms[roomCode]?.gameState?.strikers && rooms[roomCode]?.gameState?.puck)) {
       airHockeyGameServer.stopGameLoop(roomCode);
     }
     delete rooms[roomCode];
@@ -928,7 +928,7 @@ io.on("connection", (socket) => {
     if (room) {
       console.log(`Matchmaking cancelled for room ${roomCode}`);
       io.to(roomCode).emit("room_cancelled");
-      if (room.gameState?.strikers && room.gameState?.puck) {
+      if (room.mode === 'air_hockey' || (room.gameState?.strikers && room.gameState?.puck)) {
         airHockeyGameServer.stopGameLoop(roomCode);
       }
       delete rooms[roomCode];
@@ -945,7 +945,7 @@ io.on("connection", (socket) => {
 
       // If room is empty, delete it
       if (Object.keys(room.players).length === 0) {
-        if (room.gameState?.strikers && room.gameState?.puck) {
+        if (room.mode === 'air_hockey' || (room.gameState?.strikers && room.gameState?.puck)) {
           airHockeyGameServer.stopGameLoop(roomCode);
         }
         delete rooms[roomCode];
@@ -977,7 +977,7 @@ io.on("connection", (socket) => {
       if (gameState?.winner || gameState?.status === "game_over") {
         room.status = "game_over";
         scheduleRoomDelete(roomCode, 60000); // keep room 60 s for rematch
-        if (room.gameState.strikers && room.gameState.puck) {
+        if (room.mode === 'air_hockey' || (room.gameState.strikers && room.gameState.puck)) {
           airHockeyGameServer.stopGameLoop(roomCode);
         }
       }
@@ -1034,7 +1034,7 @@ io.on("connection", (socket) => {
       io.to(roomCode).emit("game_state_update", gameState); // Initial state
 
       // Start physics loop if it's an Air Hockey game
-      if (gameState.strikers && gameState.puck) {
+      if (room.mode === 'air_hockey' || (gameState.strikers && gameState.puck)) {
         airHockeyGameServer.startGameLoop(roomCode);
       }
     } else {
@@ -1414,7 +1414,7 @@ io.on("connection", (socket) => {
         if (room.status === "playing" || room.status === "game_over") {
           scheduleRoomDelete(code, 60000);
         } else {
-          if (room.gameState?.strikers && room.gameState?.puck) {
+          if (room.mode === 'air_hockey' || (room.gameState?.strikers && room.gameState?.puck)) {
             airHockeyGameServer.stopGameLoop(code);
           }
           delete rooms[code];
