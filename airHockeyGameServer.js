@@ -262,7 +262,15 @@ class AirHockeyGameServer {
       let newVy = puck.vy + ny * impulse + ny * pushFactor * baseHitVelocity;
 
       // Clamp speed to prevent extreme velocities (matching client MAX_SPEED_NORMALIZED = 0.06)
-      const speed = Math.sqrt(newVx * newVx + newVy * newVy);
+      let speed = Math.sqrt(newVx * newVx + newVy * newVy);
+      const MIN_HIT_SPEED = 0.035; // Fast, satisfying speed even for slow touches
+      if (speed < MIN_HIT_SPEED) {
+        const angle = speed > 0.001 ? Math.atan2(newVy, newVx) : Math.atan2(ny, nx);
+        newVx = Math.cos(angle) * MIN_HIT_SPEED;
+        newVy = Math.sin(angle) * MIN_HIT_SPEED;
+        speed = MIN_HIT_SPEED;
+      }
+
       const MAX_SPEED_NORMALIZED = 0.06;
       if (speed > MAX_SPEED_NORMALIZED) {
         newVx = (newVx / speed) * MAX_SPEED_NORMALIZED;
