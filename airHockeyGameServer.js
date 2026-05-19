@@ -88,6 +88,8 @@ class AirHockeyGameServer {
       lastP1Pos = { ...currP1 };
       lastP2Pos = { ...currP2 };
 
+      // Check for continuous collision processing to prevent puck getting stuck inside paddle
+      let collisionProcessed = false;
       for (let step = 0; step < SUB_STEPS; step++) {
         if (!gameState.puck) continue;
 
@@ -137,13 +139,19 @@ class AirHockeyGameServer {
         const p1Result = this.checkPaddleCollision(gameState.strikers.player1, { x, y, vx, vy }, p1Vel, 1.5, TABLE_WIDTH, TABLE_HEIGHT);
         if (p1Result.hit) {
           x = p1Result.x; y = p1Result.y; vx = p1Result.vx; vy = p1Result.vy;
-          gameState.hits.p1++;
+          if (!collisionProcessed) {
+            gameState.hits.p1++;
+            collisionProcessed = true;
+          }
         }
 
         const p2Result = this.checkPaddleCollision(gameState.strikers.player2, { x, y, vx, vy }, p2Vel, 3.5, TABLE_WIDTH, TABLE_HEIGHT);
         if (p2Result.hit) {
           x = p2Result.x; y = p2Result.y; vx = p2Result.vx; vy = p2Result.vy;
-          gameState.hits.p2++;
+          if (!collisionProcessed) {
+            gameState.hits.p2++;
+            collisionProcessed = true;
+          }
         }
 
         // Friction
@@ -201,7 +209,8 @@ class AirHockeyGameServer {
     const dy = (puck.y - paddle.y) * TABLE_HEIGHT;
     const distance = Math.sqrt(dx * dx + dy * dy);
     
-    const minDistance = PADDLE_RADIUS + PUCK_RADIUS;
+    // Increased collision radius by 15% to prevent tunneling/passing through
+    const minDistance = (PADDLE_RADIUS + PUCK_RADIUS) * 1.15;
 
     if (distance < minDistance && distance > 0) {
       const nx = dx / distance;
@@ -212,17 +221,20 @@ class AirHockeyGameServer {
 
       const velAlongNormal = relVx * nx + relVy * ny;
 
-      if (velAlongNormal < 0) {
+      // Ensure we push the puck out even if it's slightly moving away but still overlapping
+      // This prevents tunneling completely
+      if (velAlongNormal < 0 || distance < minDistance * 0.9) {
         const restitution = 0.8; // Bounciness
-        const impulse = -(1 + restitution) * velAlongNormal;
+        const impulse = -(1 + restitution) * Math.min(velAlongNormal, 0); // Don't apply negative impulse if moving away
 
         const pushFactor = (minDistance - distance) / minDistance;
         const baseHitVelocity = 0.015;
 
         return {
           hit: true,
-          x: paddle.x + nx * (minDistance / TABLE_WIDTH),
-          y: paddle.y + ny * (minDistance / TABLE_HEIGHT),
+          // Push slightly further out to ensure it escapes the collision zone in the next frame
+          x: paddle.x + nx * ((minDistance + 2) / TABLE_WIDTH),
+          y: paddle.y + ny * ((minDistance + 2) / TABLE_HEIGHT),
           vx: puck.vx + nx * impulse + nx * pushFactor * baseHitVelocity,
           vy: puck.vy + ny * impulse + ny * pushFactor * baseHitVelocity
         };
