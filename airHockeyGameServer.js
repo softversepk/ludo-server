@@ -23,9 +23,14 @@ class AirHockeyGameServer {
       // Client sends paddle move here
       socket.on("paddle_move", ({ roomCode, playerKey, x, y }) => {
         const room = this.rooms[roomCode];
-        if (room && room.gameState && room.gameState.strikers) {
-          // Normalize paddle positions
-          room.gameState.strikers[playerKey] = { x, y };
+        if (room && room.gameState) {
+          if (!room.gameState.targetStrikers) {
+            room.gameState.targetStrikers = {
+              player1: room.gameState.strikers?.player1 ? { ...room.gameState.strikers.player1 } : { x: 0.5, y: 0.75 },
+              player2: room.gameState.strikers?.player2 ? { ...room.gameState.strikers.player2 } : { x: 0.5, y: 0.25 },
+            };
+          }
+          room.gameState.targetStrikers[playerKey] = { x, y };
           
           // Optionally broadcast opponent paddle move immediately to reduce perceived lag
           socket.to(roomCode).emit("opponent_paddle_move", { playerKey, x, y });
@@ -51,6 +56,13 @@ class AirHockeyGameServer {
       room.gameState.strikers = {
         player1: { x: 0.5, y: 0.75 },
         player2: { x: 0.5, y: 0.25 },
+      };
+    }
+
+    if (!room.gameState.targetStrikers) {
+      room.gameState.targetStrikers = {
+        player1: { ...room.gameState.strikers.player1 },
+        player2: { ...room.gameState.strikers.player2 },
       };
     }
     
@@ -81,6 +93,21 @@ class AirHockeyGameServer {
         if (!gameState.scores) {
           gameState.scores = { player1: 0, player2: 0 };
         }
+
+        if (!gameState.targetStrikers) {
+          gameState.targetStrikers = {
+            player1: { ...gameState.strikers.player1 },
+            player2: { ...gameState.strikers.player2 },
+          };
+        }
+
+        // Smoothly interpolate striker positions towards targets (LERP) to make velocity continuous and smooth
+        const LERP_FACTOR = 0.35;
+        gameState.strikers.player1.x += (gameState.targetStrikers.player1.x - gameState.strikers.player1.x) * LERP_FACTOR;
+        gameState.strikers.player1.y += (gameState.targetStrikers.player1.y - gameState.strikers.player1.y) * LERP_FACTOR;
+
+        gameState.strikers.player2.x += (gameState.targetStrikers.player2.x - gameState.strikers.player2.x) * LERP_FACTOR;
+        gameState.strikers.player2.y += (gameState.targetStrikers.player2.y - gameState.strikers.player2.y) * LERP_FACTOR;
 
         const currP1 = gameState.strikers.player1;
         const currP2 = gameState.strikers.player2;
