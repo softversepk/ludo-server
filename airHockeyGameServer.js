@@ -63,137 +63,148 @@ class AirHockeyGameServer {
     let broadcastCounter = 0;
 
     const loop = setInterval(() => {
-      if (!this.rooms[roomCode] || this.rooms[roomCode].status !== "playing") {
-        this.stopGameLoop(roomCode);
-        return;
-      }
-
-      const gameState = this.rooms[roomCode].gameState;
-      if (!gameState || !gameState.strikers || !gameState.strikers.player1 || !gameState.strikers.player2) {
-        return;
-      }
-
-      const currP1 = gameState.strikers.player1;
-      const currP2 = gameState.strikers.player2;
-
-      // Server calculates velocity
-      const p1Vel = {
-        x: (currP1.x - lastP1Pos.x) / SUB_STEPS,
-        y: (currP1.y - lastP1Pos.y) / SUB_STEPS,
-      };
-      const p2Vel = {
-        x: (currP2.x - lastP2Pos.x) / SUB_STEPS,
-        y: (currP2.y - lastP2Pos.y) / SUB_STEPS,
-      };
-
-      lastP1Pos = { ...currP1 };
-      lastP2Pos = { ...currP2 };
-
-      // Check for continuous collision processing to prevent puck getting stuck inside paddle
-      let collisionProcessed = false;
-      for (let step = 0; step < SUB_STEPS; step++) {
-        if (!gameState.puck) continue;
-
-        let { x, y, vx, vy } = gameState.puck;
-
-        x += vx / SUB_STEPS;
-        y += vy / SUB_STEPS;
-
-        // Wall collisions - Assuming TABLE_WIDTH = 1.0 (normalized)
-        // Client uses PUCK_RADIUS / TABLE_WIDTH. Let's approximate based on typical screen
-        // Say aspect ratio is roughly 0.6 / 0.9.
-        // We'll just use the exact math from the client.
-        // But server doesn't know TABLE_WIDTH. We assume TABLE_WIDTH = 1.0, TABLE_HEIGHT = 1.0 in normalized coordinates.
-        // Actually, client sends normalized (0 to 1). So radius in normalized is roughly:
-        // Let's use generic width and height matching typical phone to calculate distance
-        const TABLE_WIDTH = 400; // arbitrary reference for radius scaling
-        const TABLE_HEIGHT = 600;
-        const minX = PUCK_RADIUS / TABLE_WIDTH;
-        const maxX = 1 - minX;
-        const minY = PUCK_RADIUS / TABLE_HEIGHT;
-        const maxY = 1 - minY;
-
-        if (x <= minX || x >= maxX) {
-          vx = -vx * 0.9;
-          x = Math.max(minX, Math.min(maxX, x));
-          gameState.hits.wall++;
+      try {
+        if (!this.rooms[roomCode] || this.rooms[roomCode].status !== "playing") {
+          this.stopGameLoop(roomCode);
+          return;
         }
 
-        if (y <= minY || y >= maxY) {
-          const goalRange = GOAL_WIDTH_NORMALIZED / 2;
-          const isInGoalRange = x > 0.5 - goalRange && x < 0.5 + goalRange;
+        const gameState = this.rooms[roomCode].gameState;
+        if (!gameState || !gameState.strikers || !gameState.strikers.player1 || !gameState.strikers.player2) {
+          return;
+        }
 
-          if (isInGoalRange) {
-            if (y <= 0 || y >= 1) {
-              // Goal
-              this.handleGoal(roomCode, y <= 0 ? "player1" : "player2");
-              return;
-            }
-          } else {
-            vy = -vy * 0.9;
-            y = Math.max(minY, Math.min(maxY, y));
+        // Safe initialization of scores and hits to prevent undefined TypeError crashes
+        if (!gameState.hits) {
+          gameState.hits = { p1: 0, p2: 0, wall: 0 };
+        }
+        if (!gameState.scores) {
+          gameState.scores = { player1: 0, player2: 0 };
+        }
+
+        const currP1 = gameState.strikers.player1;
+        const currP2 = gameState.strikers.player2;
+
+        // Server calculates velocity
+        const p1Vel = {
+          x: (currP1.x - lastP1Pos.x) / SUB_STEPS,
+          y: (currP1.y - lastP1Pos.y) / SUB_STEPS,
+        };
+        const p2Vel = {
+          x: (currP2.x - lastP2Pos.x) / SUB_STEPS,
+          y: (currP2.y - lastP2Pos.y) / SUB_STEPS,
+        };
+
+        lastP1Pos = { ...currP1 };
+        lastP2Pos = { ...currP2 };
+
+        // Check for continuous collision processing to prevent puck getting stuck inside paddle
+        let collisionProcessed = false;
+        for (let step = 0; step < SUB_STEPS; step++) {
+          if (!gameState.puck) continue;
+
+          let { x, y, vx, vy } = gameState.puck;
+
+          x += vx / SUB_STEPS;
+          y += vy / SUB_STEPS;
+
+          // Wall collisions - Assuming TABLE_WIDTH = 1.0 (normalized)
+          // Client uses PUCK_RADIUS / TABLE_WIDTH. Let's approximate based on typical screen
+          // Say aspect ratio is roughly 0.6 / 0.9.
+          // We'll just use the exact math from the client.
+          // But server doesn't know TABLE_WIDTH. We assume TABLE_WIDTH = 1.0, TABLE_HEIGHT = 1.0 in normalized coordinates.
+          // Actually, client sends normalized (0 to 1). So radius in normalized is roughly:
+          // Let's use generic width and height matching typical phone to calculate distance
+          const TABLE_WIDTH = 400; // arbitrary reference for radius scaling
+          const TABLE_HEIGHT = 600;
+          const minX = PUCK_RADIUS / TABLE_WIDTH;
+          const maxX = 1 - minX;
+          const minY = PUCK_RADIUS / TABLE_HEIGHT;
+          const maxY = 1 - minY;
+
+          if (x <= minX || x >= maxX) {
+            vx = -vx * 0.9;
+            x = Math.max(minX, Math.min(maxX, x));
             gameState.hits.wall++;
           }
-        }
 
-        // Paddle collisions
-        const p1Result = this.checkPaddleCollision(gameState.strikers.player1, { x, y, vx, vy }, p1Vel, 1.5, TABLE_WIDTH, TABLE_HEIGHT);
-        if (p1Result.hit) {
-          x = p1Result.x; y = p1Result.y; vx = p1Result.vx; vy = p1Result.vy;
-          if (!collisionProcessed) {
-            gameState.hits.p1++;
-            collisionProcessed = true;
+          if (y <= minY || y >= maxY) {
+            const goalRange = GOAL_WIDTH_NORMALIZED / 2;
+            const isInGoalRange = x > 0.5 - goalRange && x < 0.5 + goalRange;
+
+            if (isInGoalRange) {
+              if (y <= 0 || y >= 1) {
+                // Goal
+                this.handleGoal(roomCode, y <= 0 ? "player1" : "player2");
+                return;
+              }
+            } else {
+              vy = -vy * 0.9;
+              y = Math.max(minY, Math.min(maxY, y));
+              gameState.hits.wall++;
+            }
           }
-        }
 
-        const p2Result = this.checkPaddleCollision(gameState.strikers.player2, { x, y, vx, vy }, p2Vel, 3.5, TABLE_WIDTH, TABLE_HEIGHT);
-        if (p2Result.hit) {
-          x = p2Result.x; y = p2Result.y; vx = p2Result.vx; vy = p2Result.vy;
-          if (!collisionProcessed) {
-            gameState.hits.p2++;
-            collisionProcessed = true;
+          // Paddle collisions
+          const p1Result = this.checkPaddleCollision(gameState.strikers.player1, { x, y, vx, vy }, p1Vel, 1.5, TABLE_WIDTH, TABLE_HEIGHT);
+          if (p1Result.hit) {
+            x = p1Result.x; y = p1Result.y; vx = p1Result.vx; vy = p1Result.vy;
+            if (!collisionProcessed) {
+              gameState.hits.p1++;
+              collisionProcessed = true;
+            }
           }
+
+          const p2Result = this.checkPaddleCollision(gameState.strikers.player2, { x, y, vx, vy }, p2Vel, 3.5, TABLE_WIDTH, TABLE_HEIGHT);
+          if (p2Result.hit) {
+            x = p2Result.x; y = p2Result.y; vx = p2Result.vx; vy = p2Result.vy;
+            if (!collisionProcessed) {
+              gameState.hits.p2++;
+              collisionProcessed = true;
+            }
+          }
+
+          // Friction
+          const subFriction = Math.pow(FRICTION, 1 / SUB_STEPS);
+          vx *= subFriction;
+          vy *= subFriction;
+
+          gameState.puck = { x, y, vx, vy };
         }
 
-        // Friction
-        const subFriction = Math.pow(FRICTION, 1 / SUB_STEPS);
-        vx *= subFriction;
-        vy *= subFriction;
-
-        gameState.puck = { x, y, vx, vy };
-      }
-
-      // Timer logic (Server managed)
-      if (!room.gameState.lastTimerUpdate) {
-        room.gameState.lastTimerUpdate = Date.now();
-      }
-      
-      const now = Date.now();
-      if (now - room.gameState.lastTimerUpdate >= 1000) {
-        if (room.gameState.timeLeft > 0) {
-          room.gameState.timeLeft -= 1;
-        } else if (room.gameState.timeLeft === 0 && room.gameState.status === "playing") {
-          // Time up! Decide winner based on score
-          const p1Score = room.gameState.scores.player1;
-          const p2Score = room.gameState.scores.player2;
-          let winner = "draw";
-          if (p1Score > p2Score) winner = "player1";
-          else if (p2Score > p1Score) winner = "player2";
-          
-          room.gameState.winner = winner;
-          room.gameState.status = "game_over";
-          room.status = "game_over";
-          this.stopGameLoop(roomCode);
+        // Timer logic (Server managed)
+        if (!room.gameState.lastTimerUpdate) {
+          room.gameState.lastTimerUpdate = Date.now();
         }
-        room.gameState.lastTimerUpdate = now;
-      }
+        
+        const now = Date.now();
+        if (now - room.gameState.lastTimerUpdate >= 1000) {
+          if (room.gameState.timeLeft > 0) {
+            room.gameState.timeLeft -= 1;
+          } else if (room.gameState.timeLeft === 0 && room.gameState.status === "playing") {
+            // Time up! Decide winner based on score
+            const p1Score = room.gameState.scores.player1;
+            const p2Score = room.gameState.scores.player2;
+            let winner = "draw";
+            if (p1Score > p2Score) winner = "player1";
+            else if (p2Score > p1Score) winner = "player2";
+            
+            room.gameState.winner = winner;
+            room.gameState.status = "game_over";
+            room.status = "game_over";
+            this.stopGameLoop(roomCode);
+          }
+          room.gameState.lastTimerUpdate = now;
+        }
 
-      // Broadcast game state to room at 30 FPS instead of 60 FPS to prevent polling network overflow
-      broadcastCounter++;
-      if (broadcastCounter % 2 === 0) {
-        this.io.to(roomCode).emit("game_state_update", gameState);
+        // Broadcast game state to room at 30 FPS instead of 60 FPS to prevent polling network overflow
+        broadcastCounter++;
+        if (broadcastCounter % 2 === 0) {
+          this.io.to(roomCode).emit("game_state_update", gameState);
+        }
+      } catch (err) {
+        console.error("❌ [AirHockeyServer] Exception inside physics game loop:", err);
       }
-
     }, INTERVAL_MS);
 
     this.gameLoops[roomCode] = loop;
