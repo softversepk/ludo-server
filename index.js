@@ -1004,6 +1004,16 @@ io.on("connection", (socket) => {
     }
   });
 
+  // PUCK HIT (Optimized for Air Hockey client-side hit authority)
+  socket.on("puck_hit", ({ roomCode, puck }) => {
+    const room = rooms[roomCode];
+    if (room && room.gameState) {
+      room.gameState.puck = puck;
+      // Broadcast the puck hit to the other player
+      socket.to(roomCode).emit("opponent_puck_hit", { puck });
+    }
+  });
+
   // SNAKE TURN (Optimized for Snake Vs Snake)
   socket.on("snake_turn", (data) => {
     const { roomCode, playerKey, angle } = data;
