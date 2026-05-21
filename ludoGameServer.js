@@ -606,8 +606,8 @@ class LudoGameServer {
     // Check for win
     const won = player.finishedCount === 4;
 
-    // Determine next turn (note: 6s are handled by accumulating rolls)
-    const bonusTurn = killed !== null;
+    // Determine next turn (bonus turn on kill is disabled per user request, note: 6s are handled by accumulating rolls)
+    const bonusTurn = false; // Previously: killed !== null;
 
     const remainingDice = room.gameState.diceValues && room.gameState.diceValues.length > 1 
       ? room.gameState.diceValues.slice(1) 
