@@ -253,51 +253,27 @@ class LudoGameServer {
       }
       room.gameState.lastDiceValues[player.color] = diceValue;
 
-      // Handle accumulated dice logic for 6s
-      if (!room.gameState.diceValues) room.gameState.diceValues = [];
-      room.gameState.diceValues.push(diceValue);
+      // Calculate valid moves
+      const validMoves = this.calculateValidMoves(
+        room.gameState.players[player.color].tokens,
+        diceValue,
+        player.color
+      );
 
-      const newConsecutiveSixes = diceValue === 6 ? (room.gameState.consecutiveSixes || 0) + 1 : 0;
-      room.gameState.consecutiveSixes = newConsecutiveSixes;
-
-      let validMoves = [];
-      
-      if (newConsecutiveSixes >= 3) {
-        // Lose turn
-        room.gameState.diceValues = [];
-        this.skipTurn(room, player.color, diceValue);
-      } else if (diceValue === 6) {
-        // Roll again
-        room.gameState.status = GAME_STATE.ROLLING;
-        room.gameState.validMoves = [];
+      if (validMoves.length > 0) {
+        room.gameState.status = GAME_STATE.MOVING;
+        room.gameState.validMoves = validMoves;
       } else {
-        // Calculate valid moves for the FIRST pending dice
-        const activeDice = room.gameState.diceValues[0];
-        room.gameState.diceValue = activeDice;
-        
-        validMoves = this.calculateValidMoves(
-          room.gameState.players[player.color].tokens,
-          activeDice,
-          player.color
-        );
-
-        if (validMoves.length > 0) {
-          room.gameState.status = GAME_STATE.MOVING;
-          room.gameState.validMoves = validMoves;
-        } else {
-          // No valid moves, skip turn (simplified, clears all dice)
-          room.gameState.diceValues = [];
-          this.skipTurn(room, player.color, activeDice);
-        }
+        // No valid moves, auto-skip turn
+        this.skipTurn(room, player.color, diceValue);
       }
 
       // Broadcast delta update (only changed fields)
       this.broadcastDeltaUpdate(roomId, {
         type: 'dice_roll',
         playerColor: player.color,
-        diceValue: room.gameState.diceValue || diceValue, // Send current active or rolled
-        diceValues: room.gameState.diceValues, // Sync accumulated dice
-        validMoves: room.gameState.validMoves || [],
+        diceValue,
+        validMoves: validMoves.length > 0 ? validMoves : [],
         status: room.gameState.status,
         timestamp: Date.now()
       });
@@ -606,41 +582,13 @@ class LudoGameServer {
     // Check for win
     const won = player.finishedCount === 4;
 
-    // Determine next turn (bonus turn on kill is disabled per user request, note: 6s are handled by accumulating rolls)
-    const bonusTurn = false; // Previously: killed !== null;
+    // Determine next turn
+    const bonusTurn = diceValue === 6 || killed !== null;
 
-    const remainingDice = room.gameState.diceValues && room.gameState.diceValues.length > 1 
-      ? room.gameState.diceValues.slice(1) 
-      : [];
-
-    if (won) {
-      // Game over logic handled after executeMove
-    } else if (bonusTurn) {
-      room.gameState.status = GAME_STATE.ROLLING;
-      room.gameState.diceValues = remainingDice;
-      room.gameState.diceValue = null;
-      room.gameState.validMoves = [];
-    } else if (remainingDice.length > 0) {
-      const activeDice = remainingDice[0];
-      const nextValidMoves = this.calculateValidMoves(
-        player.tokens,
-        activeDice,
-        playerColor
-      );
-      
-      room.gameState.diceValues = remainingDice;
-      room.gameState.diceValue = activeDice;
-      
-      if (nextValidMoves.length > 0) {
-        room.gameState.status = GAME_STATE.MOVING;
-        room.gameState.validMoves = nextValidMoves;
-      } else {
-        room.gameState.diceValues = [];
-        this.nextTurn(room);
-      }
-    } else {
-      room.gameState.diceValues = [];
+    if (!bonusTurn && !won) {
       this.nextTurn(room);
+    } else {
+      room.gameState.status = GAME_STATE.ROLLING;
     }
 
     return {
@@ -682,8 +630,12 @@ class LudoGameServer {
    * Skip turn and move to next player
    */
   skipTurn(room, currentColor, diceValue) {
-    room.gameState.diceValues = [];
-    this.nextTurn(room);
+    // Don't skip if rolled 6
+    if (diceValue !== 6) {
+      this.nextTurn(room);
+    } else {
+      room.gameState.status = GAME_STATE.ROLLING;
+    }
   }
 
   /**
