@@ -330,6 +330,63 @@ function authenticateFinancialRequest(req, res, next) {
   next();
 };
 
+// SECURE UNDO ROLL ENDPOINT
+app.post('/api/game/undo-roll', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { userId, roomId, gameType } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({ success: false, error: 'Missing user ID' });
+    }
+
+    if (!admin.apps.length) {
+      return res.status(503).json({ success: false, error: 'Firebase Admin not initialized' });
+    }
+
+    const db = admin.firestore();
+    const userRef = db.collection('users').doc(userId);
+
+    let generatedDiceValue = 1;
+    let newDiamonds = 0;
+
+    // Run in transaction to ensure they have enough diamonds
+    await db.runTransaction(async (transaction) => {
+      const userDoc = await transaction.get(userRef);
+      if (!userDoc.exists) {
+        throw new Error('User not found');
+      }
+
+      const userData = userDoc.data();
+      const currentDiamonds = userData.diamonds || 0;
+
+      if (currentDiamonds < 5) {
+        throw new Error('Not enough diamonds');
+      }
+
+      newDiamonds = currentDiamonds - 5;
+      transaction.update(userRef, { diamonds: newDiamonds });
+      
+      // Generate secure random dice roll on backend
+      generatedDiceValue = Math.floor(Math.random() * 6) + 1;
+    });
+
+    // If it's a multiplayer game using ludoGameServer, we might want to update the room state
+    // But since GameScreen uses throttledFirebaseSync, the frontend will broadcast the new diceValue
+    // as part of the state update. The backend provides the securely generated value and deducts currency.
+
+    res.json({
+      success: true,
+      diceValue: generatedDiceValue,
+      newDiamonds: newDiamonds,
+      message: 'Undo successful, 5 diamonds deducted'
+    });
+
+  } catch (error) {
+    console.error('❌ [UNDO-ROLL] Error:', error.message);
+    res.status(200).json({ success: false, error: error.message || 'Failed to process undo' });
+  }
+});
+
 // CHEST BOX CLAIM ENDPOINT (Highly Secure)
 app.post('/api/chest/claim', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
@@ -812,7 +869,7 @@ gameChatServer.initialize();
 console.log("✅ Game Chat Server initialized with secure Socket.IO");
 
 // Initialize Ludo Game Server
-const ludoGameServer = new LudoGameServer(io);
+const ludoGameServer = new LudoGameServer(io, admin);
 ludoGameServer.initialize();
 ludoGameServer.startConnectionMonitoring();
 
