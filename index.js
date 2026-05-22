@@ -395,7 +395,7 @@ app.post('/api/game/undo-roll', strictLimiter, authenticateFinancialRequest, asy
     const userRef = db.collection('users').doc(userId);
 
     let generatedDiceValue = 1;
-    let newDiamonds = 0;
+    let newGems = 0;
 
     // Run in transaction to ensure they have enough diamonds
     await db.runTransaction(async (transaction) => {
@@ -405,14 +405,14 @@ app.post('/api/game/undo-roll', strictLimiter, authenticateFinancialRequest, asy
       }
 
       const userData = userDoc.data();
-      const currentDiamonds = userData.diamonds || 0;
+      const currentGems = userData.gems || 0;
 
-      if (currentDiamonds < cost) {
+      if (currentGems < cost) {
         throw new Error(`Not enough diamonds. You need ${cost} diamonds for this undo.`);
       }
 
-      newDiamonds = currentDiamonds - cost;
-      transaction.update(userRef, { diamonds: newDiamonds });
+      newGems = currentGems - cost;
+      transaction.update(userRef, { gems: newGems });
       
       // Generate secure random dice roll on backend
       generatedDiceValue = Math.floor(Math.random() * 6) + 1;
@@ -430,7 +430,8 @@ app.post('/api/game/undo-roll', strictLimiter, authenticateFinancialRequest, asy
     res.json({
       success: true,
       diceValue: generatedDiceValue,
-      newDiamonds: newDiamonds,
+      newGems: newGems,
+      newDiamonds: newGems, // Keep for backward compatibility
       cost: cost,
       nextCost: getUndoCost(undoData.count),
       undoCount: undoData.count,
