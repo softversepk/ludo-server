@@ -137,8 +137,28 @@ class LudoGameServer {
       // Remove player
       if (room.players[playerId]) {
         const playerColor = room.players[playerId].color;
-        delete room.players[playerId];
-        delete room.gameState.players[playerColor];
+        
+        // Mark player as left instead of deleting immediately if game is in progress
+        if (room.gameState.status === GAME_STATE.MOVING || room.gameState.status === GAME_STATE.ROLLING) {
+           room.players[playerId].hasLeft = true;
+           room.players[playerId].connected = false;
+           // Move all tokens home and finish them so they can't be played
+           if (room.gameState.players[playerColor]) {
+               room.gameState.players[playerColor].tokens.forEach(t => {
+                   t.position = -1;
+                   t.state = TOKEN_STATE.FINISHED;
+               });
+           }
+           
+           // Check if there's only 1 real player left, auto-win
+           const activeRealPlayers = Object.values(room.players).filter(p => !p.hasLeft && !p.isBot);
+           if (activeRealPlayers.length === 1) {
+               this.handleGameOver(room, activeRealPlayers[0].color);
+           }
+        } else {
+           delete room.players[playerId];
+           delete room.gameState.players[playerColor];
+        }
       }
 
       socket.leave(roomId);
@@ -146,7 +166,7 @@ class LudoGameServer {
 
       // Check if any real human players are left
       const remainingPlayers = Object.values(room.players);
-      const hasRealPlayers = remainingPlayers.some(p => !p.isBot);
+      const hasRealPlayers = remainingPlayers.some(p => !p.isBot && !p.hasLeft);
 
       // If room is empty or only bots left, delete it
       if (!hasRealPlayers) {
@@ -667,7 +687,15 @@ class LudoGameServer {
       timestamp: Date.now()
     });
 
-    console.log(`🏆 [GAME OVER] Winner: ${winnerColor} in room ${room.id}`);
+    console.log(`🏆 [GAME OVER] Winner: ${playerColor} in room ${roomId}`);
+
+      // Clear the room after a grace period so bots stop playing
+      setTimeout(() => {
+        if (this.rooms.has(roomId)) {
+          this.rooms.delete(roomId);
+          console.log(`🗑️ [CLEANUP] Room ${roomId} deleted after game over`);
+        }
+      }, 30000);
   }
 
   /**
