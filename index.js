@@ -456,7 +456,8 @@ app.post('/api/chest/claim', strictLimiter, authenticateFinancialRequest, async 
     res.status(200).json({ success: true, message: 'Chest claimed successfully' });
   } catch (error) {
     console.error('Error claiming chest:', error.message);
-    res.status(400).json({ error: error.message || 'Failed to claim chest' });
+    // Return 200 with success: false for business logic errors to prevent browser console 400 errors
+    res.status(200).json({ success: false, error: error.message || 'Failed to claim chest' });
   }
 });
 
