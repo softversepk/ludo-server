@@ -10,6 +10,7 @@ const LudoGameServer = require("./ludoGameServer");
 const ClubChatServer = require("./clubChatServer");
 const LeaderboardServer = require("./leaderboardServer");
 const ChessGameServer = require("./chessGameServer");
+const TicTacToeGameServer = require("./ticTacToeServer");
 const { processUserXP } = require('./xpService');
 const admin = require('firebase-admin');
 
@@ -621,6 +622,12 @@ console.log("✅ Leaderboard Server initialized with real-time rankings");
 const chessGameServer = new ChessGameServer(io);
 
 console.log("✅ Chess Game Server initialized with real-time Socket.IO sync");
+
+// Initialize Tic Tac Toe Game Server
+const ticTacToeGameServer = new TicTacToeGameServer(io, rooms);
+ticTacToeGameServer.initialize();
+
+console.log("✅ Tic Tac Toe Game Server initialized with Authoritative Model");
 
 // Helper to generate room code
 const generateRoomCode = () => {
