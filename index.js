@@ -330,6 +330,136 @@ function authenticateFinancialRequest(req, res, next) {
   next();
 };
 
+// CHEST BOX CLAIM ENDPOINT (Highly Secure)
+app.post('/api/chest/claim', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { chestId } = req.body;
+    const userId = req.userId;
+
+    if (!chestId) {
+      return res.status(400).json({ error: 'Missing chest ID' });
+    }
+
+    if (!admin.apps.length) {
+      return res.status(503).json({ error: 'Firebase Admin not initialized' });
+    }
+
+    const db = admin.firestore();
+    
+    // Run the entire claim process in a transaction
+    await db.runTransaction(async (transaction) => {
+      const chestRef = db.collection('chest_boxes').doc(chestId);
+      const userRef = db.collection('users').doc(userId);
+
+      const [chestDoc, userDoc] = await Promise.all([
+        transaction.get(chestRef),
+        transaction.get(userRef)
+      ]);
+
+      if (!chestDoc.exists) {
+        throw new Error('Chest box not found');
+      }
+
+      if (!userDoc.exists) {
+        throw new Error('User not found');
+      }
+
+      const chest = chestDoc.data();
+      const userProfile = userDoc.data();
+
+      // Check if chest is active
+      if (chest.isActive === false) {
+        throw new Error('This chest is no longer available');
+      }
+
+      const isDailyLogin = chest.requirementType === 'daily_login';
+      const isWins = chest.requirementType === 'wins';
+      const isTokenKills = chest.requirementType === 'token_kills';
+      const isOneTime = !isDailyLogin && !isWins && !isTokenKills;
+
+      const claimedChests = userProfile.claimedChests || [];
+      const dailyLoginChests = userProfile.dailyLoginChests || {};
+      const chestWinOffsets = userProfile.chestWinOffsets || {};
+      const chestKillOffsets = userProfile.chestKillOffsets || {};
+
+      const updates = {};
+
+      // 1. Validation logic
+      if (isDailyLogin) {
+        const nextTime = dailyLoginChests[chestId];
+        if (nextTime && Date.now() < nextTime) {
+          throw new Error('Please wait for the timer to finish before opening this chest!');
+        }
+        const days = parseFloat(chest.requirements) || 1;
+        updates.dailyLoginChests = {
+          ...dailyLoginChests,
+          [chestId]: Date.now() + (days * 24 * 60 * 60 * 1000)
+        };
+      } else if (isWins) {
+        const target = parseFloat(chest.requirements) || 1;
+        const offset = chestWinOffsets[chestId] || 0;
+        const currentWins = userProfile.totalWins || 0;
+        if (currentWins - offset < target) {
+          throw new Error('You need more wins to open this chest!');
+        }
+        updates.chestWinOffsets = {
+          ...chestWinOffsets,
+          [chestId]: currentWins
+        };
+      } else if (isTokenKills) {
+        const target = parseFloat(chest.requirements) || 1;
+        const offset = chestKillOffsets[chestId] || 0;
+        const currentKills = userProfile.totalKills || 0;
+        if (currentKills - offset < target) {
+          throw new Error('You need more token kills to open this chest!');
+        }
+        updates.chestKillOffsets = {
+          ...chestKillOffsets,
+          [chestId]: currentKills
+        };
+      } else if (isOneTime) {
+        if (claimedChests.includes(chestId)) {
+          throw new Error('You have already opened this chest!');
+        }
+        updates.claimedChests = [...claimedChests, chestId];
+      }
+
+      // 2. Add Rewards
+      const coinsReward = chest.coinsReward || 0;
+      const gemsReward = chest.gemsReward || 0;
+
+      if (coinsReward > 0) {
+        updates.coins = admin.firestore.FieldValue.increment(coinsReward);
+        updates.totalCoinsEarned = admin.firestore.FieldValue.increment(coinsReward);
+        updates.weeklyCoins = admin.firestore.FieldValue.increment(coinsReward);
+      }
+
+      if (gemsReward > 0) {
+        updates.gems = admin.firestore.FieldValue.increment(gemsReward);
+        
+        // Log diamond transaction
+        const txRef = db.collection('diamondTransactions').doc();
+        transaction.set(txRef, {
+          userId,
+          amount: gemsReward,
+          type: 'achievement_reward',
+          description: `Opened chest: ${chest.name || chestId}`,
+          timestamp: admin.firestore.FieldValue.serverTimestamp(),
+          balanceAfter: (userProfile.gems || 0) + gemsReward
+        });
+      }
+
+      // 3. Apply updates
+      transaction.update(userRef, updates);
+    });
+
+    res.status(200).json({ success: true, message: 'Chest claimed successfully' });
+  } catch (error) {
+    console.error('Error claiming chest:', error.message);
+    res.status(400).json({ error: error.message || 'Failed to claim chest' });
+  }
+});
+
 // Update Game Stats securely on the backend
 app.post('/api/game/update-stats', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
