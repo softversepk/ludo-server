@@ -97,28 +97,12 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Middleware to verify Firebase Auth Token
-const verifyToken = async (req, res, next) => {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Unauthorized: No token provided' });
-    }
-    const token = authHeader.split('Bearer ')[1];
-    const decodedToken = await admin.auth().verifyIdToken(token);
-    req.user = decodedToken;
-    next();
-  } catch (error) {
-    console.error('Token verification error:', error);
-    res.status(401).json({ error: 'Unauthorized: Invalid token' });
-  }
-};
 
 // ECONOMY ENDPOINTS
-app.post('/api/economy/update', strictLimiter, verifyToken, async (req, res) => {
+app.post('/api/economy/update', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { currency, amount, type, reason, description } = req.body;
-    const userId = req.user.uid;
+    const userId = req.userId;
     
     if (!currency || !['coins', 'gems'].includes(currency)) {
       return res.status(400).json({ error: 'Invalid currency' });
