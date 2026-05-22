@@ -348,14 +348,14 @@ class LudoGameServer {
         if (!userDoc.exists) throw new Error('User not found');
         
         const userData = userDoc.data();
-        const currentDiamonds = userData.diamonds || 0;
+        const currentGems = userData.gems || 0;
         
-        if (currentDiamonds < 5) {
+        if (currentGems < 5) {
           throw new Error('Not enough diamonds');
         }
         
         transaction.update(userRef, {
-          diamonds: currentDiamonds - 5
+          gems: currentGems - 5
         });
       });
 
