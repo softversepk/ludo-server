@@ -330,13 +330,61 @@ function authenticateFinancialRequest(req, res, next) {
   next();
 };
 
+// Undo roll tracker for match-based pricing and limits
+// Key: `${roomId}_${userId}`, Value: { count: number, lastUpdate: number }
+const undoTracker = new Map();
+
+// Helper to get undo cost
+const getUndoCost = (count) => {
+  if (count === 0) return 5;
+  if (count === 1) return 15;
+  if (count === 2) return 40;
+  if (count === 3) return 100;
+  return -1; // Max limit reached
+};
+
+// Cleanup old undo tracking data (e.g., older than 2 hours)
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, data] of undoTracker.entries()) {
+    if (now - data.lastUpdate > 2 * 60 * 60 * 1000) {
+      undoTracker.delete(key);
+    }
+  }
+}, 60 * 60 * 1000);
+
 // SECURE UNDO ROLL ENDPOINT
 app.post('/api/game/undo-roll', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
-    const { userId, roomId, gameType } = req.body;
+    const { userId, roomId, gameType, matchId, expectedCost } = req.body;
 
     if (!userId) {
       return res.status(400).json({ success: false, error: 'Missing user ID' });
+    }
+
+    const actualRoomId = roomId || matchId || 'local_match';
+    const trackerKey = `${actualRoomId}_${userId}`;
+    
+    let undoData = undoTracker.get(trackerKey) || { count: 0, lastUpdate: Date.now() };
+    
+    const cost = getUndoCost(undoData.count);
+    
+    if (cost === -1) {
+      return res.status(403).json({ 
+        success: false, 
+        error: 'Max undo limit reached for this match',
+        undoCount: undoData.count
+      });
+    }
+
+    // Check if frontend's cost matches backend's cost (to prevent out-of-sync UI charging more than expected)
+    if (expectedCost !== null && expectedCost !== undefined && expectedCost !== cost) {
+      return res.status(200).json({
+        success: false,
+        error: `Cost mismatch. The actual cost is ${cost} diamonds.`,
+        undoCount: undoData.count,
+        costMismatch: true
+      });
     }
 
     if (!admin.apps.length) {
@@ -359,16 +407,21 @@ app.post('/api/game/undo-roll', strictLimiter, authenticateFinancialRequest, asy
       const userData = userDoc.data();
       const currentDiamonds = userData.diamonds || 0;
 
-      if (currentDiamonds < 5) {
-        throw new Error('Not enough diamonds');
+      if (currentDiamonds < cost) {
+        throw new Error(`Not enough diamonds. You need ${cost} diamonds for this undo.`);
       }
 
-      newDiamonds = currentDiamonds - 5;
+      newDiamonds = currentDiamonds - cost;
       transaction.update(userRef, { diamonds: newDiamonds });
       
       // Generate secure random dice roll on backend
       generatedDiceValue = Math.floor(Math.random() * 6) + 1;
     });
+
+    // Increment count after successful transaction
+    undoData.count += 1;
+    undoData.lastUpdate = Date.now();
+    undoTracker.set(trackerKey, undoData);
 
     // If it's a multiplayer game using ludoGameServer, we might want to update the room state
     // But since GameScreen uses throttledFirebaseSync, the frontend will broadcast the new diceValue
@@ -378,7 +431,10 @@ app.post('/api/game/undo-roll', strictLimiter, authenticateFinancialRequest, asy
       success: true,
       diceValue: generatedDiceValue,
       newDiamonds: newDiamonds,
-      message: 'Undo successful, 5 diamonds deducted'
+      cost: cost,
+      nextCost: getUndoCost(undoData.count),
+      undoCount: undoData.count,
+      message: `Undo successful, ${cost} diamonds deducted`
     });
 
   } catch (error) {
