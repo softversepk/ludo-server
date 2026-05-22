@@ -36,6 +36,11 @@ class TicTacToeGameServer {
       room.status = 'game_over';
 
       this.io.to(roomId).emit("game_state_update", gameState);
+
+      // Trigger cleanup when a player resigns
+      if (this.rooms && typeof this.rooms.scheduleRoomDelete === 'function') {
+        this.rooms.scheduleRoomDelete(roomId, 60000);
+      }
     } catch (error) {
       console.error("[TicTacToe] Resign error:", error);
     }
@@ -94,6 +99,11 @@ class TicTacToeGameServer {
       // Broadcast state update
       this.io.to(roomId).emit("game_state_update", gameState);
 
+      // Trigger cleanup when game is over
+      if (room.status === 'game_over' && this.rooms && typeof this.rooms.scheduleRoomDelete === 'function') {
+        this.rooms.scheduleRoomDelete(roomId, 60000);
+      }
+
     } catch (error) {
       console.error("[TicTacToe] Move error:", error);
     }
@@ -138,6 +148,11 @@ class TicTacToeGameServer {
 
       // Broadcast state update
       this.io.to(roomId).emit("game_state_update", gameState);
+
+      // Trigger cleanup when game is over
+      if (room.status === 'game_over' && this.rooms && typeof this.rooms.scheduleRoomDelete === 'function') {
+        this.rooms.scheduleRoomDelete(roomId, 60000);
+      }
 
     } catch (error) {
       console.error("[TicTacToe] Bot move error:", error);
