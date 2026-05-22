@@ -578,6 +578,7 @@ class LudoGameServer {
 
     let newPosition;
     let newState = token.state;
+    let tokenFinished = false;
 
     // Moving from home
     if (token.position === -1) {
@@ -590,6 +591,7 @@ class LudoGameServer {
       if (newPosition === 56) {
         newState = TOKEN_STATE.FINISHED;
         player.finishedCount++;
+        tokenFinished = true;
       }
     }
 
@@ -607,7 +609,7 @@ class LudoGameServer {
     const won = player.finishedCount === 4;
 
     // Determine next turn
-    const bonusTurn = diceValue === 6 || killed !== null;
+    const bonusTurn = diceValue === 6 || killed !== null || tokenFinished;
 
     if (!bonusTurn && !won) {
       this.nextTurn(room);
