@@ -144,10 +144,14 @@ class LudoGameServer {
       socket.leave(roomId);
       this.playerConnections.delete(socket.id);
 
-      // If room is empty, delete it
-      if (Object.keys(room.players).length === 0) {
+      // Check if any real human players are left
+      const remainingPlayers = Object.values(room.players);
+      const hasRealPlayers = remainingPlayers.some(p => !p.isBot);
+
+      // If room is empty or only bots left, delete it
+      if (!hasRealPlayers) {
         this.rooms.delete(roomId);
-        console.log(`🗑️ [CLEANUP] Room ${roomId} deleted`);
+        console.log(`🗑️ [CLEANUP] Room ${roomId} deleted (only bots left or empty)`);
       } else {
         // Notify remaining players
         this.broadcastRoomUpdate(roomId);
