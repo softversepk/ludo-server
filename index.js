@@ -673,6 +673,13 @@ Object.defineProperty(rooms, 'scheduleRoomDelete', {
   writable: false
 });
 
+// Initialize Game Chat Server
+const GameChatServer = require("./gameChatServer");
+const gameChatServer = new GameChatServer(io);
+gameChatServer.initialize();
+
+console.log("✅ Game Chat Server initialized with secure Socket.IO");
+
 // Initialize Ludo Game Server
 const ludoGameServer = new LudoGameServer(io);
 ludoGameServer.initialize();
