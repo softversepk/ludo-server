@@ -300,7 +300,7 @@ app.get('/stats', strictLimiter, (req, res) => {
 
 // SECURE FINANCIAL VALIDATION ENDPOINTS
 // Authentication middleware for financial operations
-const authenticateFinancialRequest = (req, res, next) => {
+function authenticateFinancialRequest(req, res, next) {
   const authHeader = req.headers.authorization;
   const userId = req.headers['x-user-id'];
 
