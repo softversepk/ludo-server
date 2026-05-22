@@ -930,20 +930,18 @@ io.on("connection", (socket) => {
       delete room.players[playerId];
       socket.leave(roomCode);
 
-      // If room has no real players left (only bots or empty), delete it
-      const remainingRealPlayers = Object.values(room.players).filter(p => !p.isBot).length;
-      if (remainingRealPlayers === 0) {
-        console.log(`🧹 [CLEANUP] Room ${roomCode} deleted on leave_room since no human players remain.`);
+      // Check if any real human players are left
+      const remainingPlayers = Object.values(room.players);
+      const hasRealPlayers = remainingPlayers.some(p => !p.isBot);
+
+      if (!hasRealPlayers) {
         delete rooms[roomCode];
+        console.log(`[CLEANUP] Room ${roomCode} deleted (only bots left or empty)`);
       } else {
-        // If host left, assign new host prioritizing real players
+        // If host left, assign new host? For now just remove player
         if (room.host === playerId) {
-          const realPlayers = Object.values(room.players).filter(p => !p.isBot);
-          if (realPlayers.length > 0) {
-            room.host = realPlayers[0].uid;
-          } else {
-            room.host = Object.keys(room.players)[0];
-          }
+          const remaining = Object.keys(room.players);
+          if (remaining.length > 0) room.host = remaining[0];
         }
         io.to(roomCode).emit("room_update", room);
       }
@@ -1400,26 +1398,21 @@ io.on("connection", (socket) => {
       if (!player) continue;
 
       delete room.players[player.uid];
-      const remainingRealPlayers = Object.values(room.players).filter(p => !p.isBot).length;
+      const remainingPlayers = Object.values(room.players);
+      const hasRealPlayers = remainingPlayers.some(p => !p.isBot);
 
-      if (remainingRealPlayers === 0) {
-        // Room has no real players left — if game was in progress give a grace period so
+      if (!hasRealPlayers) {
+        // Room is empty or only bots left — if game was in progress give a grace period so
         // rematch / late reconnects still work; otherwise delete immediately.
-        console.log(`🧹 [CLEANUP] Room ${code} has no human players remaining. Scheduling/performing cleanup.`);
         if (room.status === "playing" || room.status === "game_over") {
           scheduleRoomDelete(code, 60000);
         } else {
           delete rooms[code];
         }
       } else {
-        // Reassign host prioritizing real players
+        // Reassign host if needed
         if (room.host === player.uid) {
-          const realPlayers = Object.values(room.players).filter(p => !p.isBot);
-          if (realPlayers.length > 0) {
-            room.host = realPlayers[0].uid;
-          } else {
-            room.host = Object.keys(room.players)[0];
-          }
+          room.host = Object.keys(room.players)[0];
         }
         io.to(code).emit("room_update", room);
       }
