@@ -65,7 +65,7 @@ app.use(limiter);
 // Stricter rate limiting for sensitive endpoints
 const strictLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10, // limit each IP to 10 requests per windowMs
+  max: 20, // limit each IP to 20 requests per windowMs
   message: {
     error: 'Too many requests to this endpoint, please try again later.',
     retryAfter: 15 * 60
@@ -95,6 +95,84 @@ app.get('/health', (req, res) => {
     uptime: Math.floor(process.uptime()),
     version: '1.0.0'
   });
+});
+
+// Middleware to verify Firebase Auth Token
+const verifyToken = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Unauthorized: No token provided' });
+    }
+    const token = authHeader.split('Bearer ')[1];
+    const decodedToken = await admin.auth().verifyIdToken(token);
+    req.user = decodedToken;
+    next();
+  } catch (error) {
+    console.error('Token verification error:', error);
+    res.status(401).json({ error: 'Unauthorized: Invalid token' });
+  }
+};
+
+// ECONOMY ENDPOINTS
+app.post('/api/economy/update', strictLimiter, verifyToken, async (req, res) => {
+  try {
+    const { currency, amount, type, reason, description } = req.body;
+    const userId = req.user.uid;
+    
+    if (!currency || !['coins', 'gems'].includes(currency)) {
+      return res.status(400).json({ error: 'Invalid currency' });
+    }
+    
+    if (typeof amount !== 'number') {
+      return res.status(400).json({ error: 'Invalid amount' });
+    }
+    
+    const userRef = admin.firestore().collection('users').doc(userId);
+    
+    await admin.firestore().runTransaction(async (transaction) => {
+      const userDoc = await transaction.get(userRef);
+      if (!userDoc.exists) {
+        throw new Error('User not found');
+      }
+      
+      const userData = userDoc.data();
+      const currentBalance = userData[currency] || 0;
+      
+      if (amount < 0 && currentBalance < Math.abs(amount)) {
+        throw new Error(`Insufficient ${currency}`);
+      }
+      
+      const updates = {
+        [currency]: admin.firestore.FieldValue.increment(amount)
+      };
+      
+      if (currency === 'coins' && amount > 0) {
+        updates.totalCoinsEarned = admin.firestore.FieldValue.increment(amount);
+        updates.weeklyCoins = admin.firestore.FieldValue.increment(amount);
+      }
+      
+      transaction.update(userRef, updates);
+      
+      // Log diamond transactions as in diamondService
+      if (currency === 'gems') {
+        const txRef = admin.firestore().collection('diamondTransactions').doc();
+        transaction.set(txRef, {
+          userId,
+          amount,
+          type,
+          description: description || reason || '',
+          timestamp: admin.firestore.FieldValue.serverTimestamp(),
+          balanceAfter: currentBalance + amount
+        });
+      }
+    });
+    
+    res.status(200).json({ success: true, message: 'Economy updated successfully' });
+  } catch (error) {
+    console.error('Error in /api/economy/update:', error.message);
+    res.status(400).json({ error: error.message || 'Internal server error' });
+  }
 });
 
 // GIFT SENDING ENDPOINT
