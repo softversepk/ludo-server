@@ -18,8 +18,9 @@ const TOKEN_STATE = {
 };
 
 class LudoGameServer {
-  constructor(io) {
+  constructor(io, admin) {
     this.io = io;
+    this.admin = admin;
     this.rooms = new Map();
     this.playerConnections = new Map(); // Track socket.id to room mapping
   }
@@ -39,6 +40,7 @@ class LudoGameServer {
 
       // Game Action Events (Optimized with Delta Updates)
       socket.on('ludo:roll_dice', (data) => this.handleRollDice(socket, data));
+      socket.on('ludo:undo_roll', (data) => this.handleUndoRoll(socket, data));
       socket.on('ludo:move_token', (data) => this.handleMoveToken(socket, data));
       socket.on('ludo:skip_turn', (data) => this.handleSkipTurn(socket, data));
 
@@ -305,6 +307,99 @@ class LudoGameServer {
       console.log(`🎲 [DICE] ${player.color} rolled ${diceValue}. Valid moves: ${validMoves.length}`);
     } catch (error) {
       console.error('❌ [DICE ERROR]', error);
+      socket.emit('ludo:action_error', { error: error.message });
+    }
+  }
+
+  /**
+   * Handle undo roll (Secure backend deduction)
+   */
+  async handleUndoRoll(socket, { roomId, playerId }) {
+    try {
+      const room = this.rooms.get(roomId);
+      if (!room) return;
+
+      const player = room.players[playerId];
+      if (!player) return;
+
+      // Validate: Is it this player's turn?
+      if (player.color !== room.gameState.currentPlayer) {
+        socket.emit('ludo:action_error', { error: 'Not your turn' });
+        return;
+      }
+
+      // Validate: Should be in MOVING state and have a dice value
+      if (room.gameState.status !== GAME_STATE.MOVING || room.gameState.diceValue === null) {
+        socket.emit('ludo:action_error', { error: 'Cannot undo roll right now' });
+        return;
+      }
+
+      // Deduct diamonds using Firebase Admin
+      if (!this.admin || !this.admin.apps.length) {
+        socket.emit('ludo:action_error', { error: 'Server configuration error' });
+        return;
+      }
+
+      const db = this.admin.firestore();
+      const userRef = db.collection('users').doc(playerId);
+      
+      await db.runTransaction(async (transaction) => {
+        const userDoc = await transaction.get(userRef);
+        if (!userDoc.exists) throw new Error('User not found');
+        
+        const userData = userDoc.data();
+        const currentDiamonds = userData.diamonds || 0;
+        
+        if (currentDiamonds < 5) {
+          throw new Error('Not enough diamonds');
+        }
+        
+        transaction.update(userRef, {
+          diamonds: currentDiamonds - 5
+        });
+      });
+
+      // Generate new dice roll
+      const diceValue = Math.floor(Math.random() * 6) + 1;
+      room.gameState.diceValue = diceValue;
+      room.gameState.lastDiceRoll = Date.now();
+
+      if (!room.gameState.lastDiceValues) {
+        room.gameState.lastDiceValues = {};
+      }
+      room.gameState.lastDiceValues[player.color] = diceValue;
+
+      // Calculate valid moves for the new roll
+      const validMoves = this.calculateValidMoves(
+        room.gameState.players[player.color].tokens,
+        diceValue,
+        player.color
+      );
+
+      if (validMoves.length > 0) {
+        room.gameState.status = GAME_STATE.MOVING;
+        room.gameState.validMoves = validMoves;
+      } else {
+        // No valid moves, auto-skip turn
+        this.skipTurn(room, player.color, diceValue);
+      }
+
+      // Broadcast delta update for the new roll
+      this.broadcastDeltaUpdate(roomId, {
+        type: 'dice_roll',
+        playerColor: player.color,
+        diceValue,
+        validMoves: validMoves.length > 0 ? validMoves : [],
+        status: room.gameState.status,
+        timestamp: Date.now(),
+        isUndo: true // Flag to notify frontend
+      });
+      
+      socket.emit('ludo:undo_success', { diamondsDeducted: 5 });
+      console.log(`⏪ [UNDO] ${player.color} paid 5 diamonds and re-rolled ${diceValue}.`);
+
+    } catch (error) {
+      console.error('❌ [UNDO ERROR]', error);
       socket.emit('ludo:action_error', { error: error.message });
     }
   }
