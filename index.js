@@ -599,6 +599,13 @@ const scheduleRoomDelete = (roomCode, delayMs = 30000) => {
   }, delayMs);
 };
 
+// Add scheduleRoomDelete to rooms object so it can be accessed by game servers
+Object.defineProperty(rooms, 'scheduleRoomDelete', {
+  value: scheduleRoomDelete,
+  enumerable: false, // Don't show up in Object.keys()
+  writable: false
+});
+
 // Initialize Ludo Game Server
 const ludoGameServer = new LudoGameServer(io);
 ludoGameServer.initialize();
