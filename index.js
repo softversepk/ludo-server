@@ -398,24 +398,24 @@ app.post('/api/chest/claim', strictLimiter, authenticateFinancialRequest, async 
       } else if (isWins) {
         const target = parseFloat(chest.requirements) || 1;
         const offset = chestWinOffsets[chestId] || 0;
-        const currentWins = userProfile.totalWins || 0;
+        const currentWins = userProfile.gamesWon || 0;
         if (currentWins - offset < target) {
           throw new Error('You need more wins to open this chest!');
         }
         updates.chestWinOffsets = {
           ...chestWinOffsets,
-          [chestId]: currentWins
+          [chestId]: offset + target
         };
       } else if (isTokenKills) {
         const target = parseFloat(chest.requirements) || 1;
         const offset = chestKillOffsets[chestId] || 0;
-        const currentKills = userProfile.totalKills || 0;
+        const currentKills = userProfile.tokensKilled || 0;
         if (currentKills - offset < target) {
           throw new Error('You need more token kills to open this chest!');
         }
         updates.chestKillOffsets = {
           ...chestKillOffsets,
-          [chestId]: currentKills
+          [chestId]: offset + target
         };
       } else if (isOneTime) {
         if (claimedChests.includes(chestId)) {
