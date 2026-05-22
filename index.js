@@ -14,16 +14,21 @@ const TicTacToeGameServer = require("./ticTacToeServer");
 const { processUserXP } = require('./xpService');
 const admin = require('firebase-admin');
 
-// Initialize Firebase Admin (Required for secure backend operations like XP)
+// Initialize Firebase Admin (Required for secure backend operations like XP and Economy)
 try {
-  // If you have a service account JSON file, you can initialize it like this:
-  // const serviceAccount = require('./serviceAccountKey.json');
-  // admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-  
-  // Or if using env vars (e.g. deployed on Railway/Heroku/Firebase):
   if (!admin.apps.length) {
-    admin.initializeApp();
-    console.log("✅ Firebase Admin initialized");
+    if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+      // Parse the JSON string from environment variable (useful for Railway)
+      const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount)
+      });
+      console.log("✅ Firebase Admin initialized with Service Account from ENV");
+    } else {
+      // Fallback: This expects GOOGLE_APPLICATION_CREDENTIALS env var pointing to a file path
+      admin.initializeApp();
+      console.log("✅ Firebase Admin initialized (Default)");
+    }
   }
 } catch (error) {
   console.warn("⚠️ Firebase Admin initialization warning:", error.message);
