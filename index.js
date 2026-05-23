@@ -945,12 +945,12 @@ leaderboardServer.initialize();
 console.log("✅ Leaderboard Server initialized with real-time rankings");
 
 // Initialize Chess Game Server
-const chessGameServer = new ChessGameServer(io);
+const chessGameServer = new ChessGameServer(io, admin);
 
 console.log("✅ Chess Game Server initialized with real-time Socket.IO sync");
 
 // Initialize Tic Tac Toe Game Server
-const ticTacToeGameServer = new TicTacToeGameServer(io, rooms);
+const ticTacToeGameServer = new TicTacToeGameServer(io, rooms, admin);
 ticTacToeGameServer.initialize();
 
 console.log("✅ Tic Tac Toe Game Server initialized with Authoritative Model");
