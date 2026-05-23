@@ -4,10 +4,13 @@ const GAME_STATE = {
   FINISHED: 'finished'
 };
 
+const RewardServiceServer = require('./rewardServiceServer');
+
 class TicTacToeGameServer {
-  constructor(io, roomsMap) {
+  constructor(io, roomsMap, admin) {
     this.io = io;
     this.rooms = roomsMap; // Reference to the shared rooms object in index.js
+    this.admin = admin;
   }
 
   initialize() {
@@ -37,12 +40,51 @@ class TicTacToeGameServer {
 
       this.io.to(roomId).emit("game_state_update", gameState);
 
+      if (!gameState.rewardsProcessed) {
+        gameState.rewardsProcessed = true;
+        this.processRewards(room, gameState);
+      }
+
       // Trigger cleanup when a player resigns
       if (this.rooms && typeof this.rooms.scheduleRoomDelete === 'function') {
         this.rooms.scheduleRoomDelete(roomId, 60000);
       }
     } catch (error) {
       console.error("[TicTacToe] Resign error:", error);
+    }
+  }
+
+  async processRewards(room, gameState) {
+    try {
+      if (!room || !room.players || !gameState.players) return;
+      const betAmount = room.betAmount || 100;
+      const winnerRole = gameState.winner; // 'X', 'O', or 'draw'
+      
+      // Players in room.players are mapped by uid. 
+      // gameState.players has { 'X': uid1, 'O': uid2 }
+      
+      for (const [uid, player] of Object.entries(room.players)) {
+        if (!player || player.isBot) continue;
+        
+        let role = null;
+        if (gameState.players.X === uid) role = 'X';
+        else if (gameState.players.O === uid) role = 'O';
+        
+        if (!role) continue;
+        
+        if (winnerRole === 'draw') {
+          await RewardServiceServer.awardGameDraw(uid, 'TIC_TAC_TOE', betAmount);
+        } else if (role === winnerRole) {
+          const result = await RewardServiceServer.awardGameWin(uid, 'TIC_TAC_TOE', betAmount);
+          if (result.success) {
+            this.io.to(room.id || room.roomCode).emit(`reward:awarded:${uid}`, result);
+          }
+        } else {
+          await RewardServiceServer.awardGameLoss(uid, 'TIC_TAC_TOE', betAmount);
+        }
+      }
+    } catch (error) {
+      console.error('Error processing rewards in TicTacToe:', error);
     }
   }
 
@@ -99,9 +141,14 @@ class TicTacToeGameServer {
       // Broadcast state update
       this.io.to(roomId).emit("game_state_update", gameState);
 
-      // Trigger cleanup when game is over
-      if (room.status === 'game_over' && this.rooms && typeof this.rooms.scheduleRoomDelete === 'function') {
-        this.rooms.scheduleRoomDelete(roomId, 60000);
+      // Trigger cleanup and rewards when game is over
+      if (room.status === 'game_over' && !gameState.rewardsProcessed) {
+        gameState.rewardsProcessed = true;
+        this.processRewards(room, gameState);
+        
+        if (this.rooms && typeof this.rooms.scheduleRoomDelete === 'function') {
+          this.rooms.scheduleRoomDelete(roomId, 60000);
+        }
       }
 
     } catch (error) {
@@ -149,9 +196,14 @@ class TicTacToeGameServer {
       // Broadcast state update
       this.io.to(roomId).emit("game_state_update", gameState);
 
-      // Trigger cleanup when game is over
-      if (room.status === 'game_over' && this.rooms && typeof this.rooms.scheduleRoomDelete === 'function') {
-        this.rooms.scheduleRoomDelete(roomId, 60000);
+      // Trigger cleanup and rewards when game is over
+      if (room.status === 'game_over' && !gameState.rewardsProcessed) {
+        gameState.rewardsProcessed = true;
+        this.processRewards(room, gameState);
+        
+        if (this.rooms && typeof this.rooms.scheduleRoomDelete === 'function') {
+          this.rooms.scheduleRoomDelete(roomId, 60000);
+        }
       }
 
     } catch (error) {
