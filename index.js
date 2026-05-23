@@ -231,8 +231,8 @@ app.post('/api/gifts/send', strictLimiter, async (req, res) => {
   }
 });
 
-// AGORA TOKEN GENERATION ENDPOINT
-app.get('/rtcToken', (req, res) => {
+// AGORA TOKEN GENERATION ENDPOINT (Secure)
+app.get('/rtcToken', strictLimiter, authenticateFinancialRequest, (req, res) => {
     res.header('Cache-Control', 'private, no-cache, no-store, must-revalidate');
     res.header('Expires', '-1');
     res.header('Pragma', 'no-cache');
