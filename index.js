@@ -965,6 +965,42 @@ const generateRoomCode = () => {
   return code;
 };
 
+// Helper to securely deduct coins
+const secureDeductCoins = async (userId, amount) => {
+  if (!amount || amount <= 0) return true;
+  try {
+    const userRef = admin.firestore().collection('users').doc(userId);
+    return await admin.firestore().runTransaction(async (transaction) => {
+      const userDoc = await transaction.get(userRef);
+      if (!userDoc.exists) throw new Error('User not found');
+      const currentCoins = userDoc.data().coins || 0;
+      if (currentCoins < amount) throw new Error('Not enough coins');
+      transaction.update(userRef, {
+        coins: admin.firestore.FieldValue.increment(-amount)
+      });
+      return true;
+    });
+  } catch (error) {
+    console.error(`[SECURITY] Coin deduction failed for ${userId}:`, error.message);
+    return false;
+  }
+};
+
+// Helper to securely refund coins
+const secureRefundCoins = async (userId, amount) => {
+  if (!amount || amount <= 0) return true;
+  try {
+    const userRef = admin.firestore().collection('users').doc(userId);
+    await userRef.update({
+      coins: admin.firestore.FieldValue.increment(amount)
+    });
+    return true;
+  } catch (error) {
+    console.error(`[SECURITY] Coin refund failed for ${userId}:`, error.message);
+    return false;
+  }
+};
+
 io.on("connection", (socket) => {
   console.log("A user connected:", socket.id);
 
@@ -1009,14 +1045,25 @@ io.on("connection", (socket) => {
   });
 
   // CREATE ROOM
-  socket.on("create_room", (hostData, callback) => {
+  socket.on("create_room", async (hostData, callback) => {
+    const betAmount = hostData.betAmount || 100;
+    
+    // Check and deduct coins before creating room
+    if (betAmount > 0) {
+      const deductionSuccess = await secureDeductCoins(hostData.uid, betAmount);
+      if (!deductionSuccess) {
+        if (callback) callback({ success: false, error: "Not enough coins or error deducting coins" });
+        return;
+      }
+    }
+
     const roomCode = generateRoomCode();
 
     // Ensure defaults
     const rules = {
       playerCount: hostData.playerCount || 4,
       maxPlayers: hostData.maxPlayers || 4,
-      betAmount: hostData.betAmount || 100,
+      betAmount,
       mode: hostData.mode || "online_random",
       isTeam: hostData.isTeam || false,
       gameMode: hostData.gameMode || "classic",
@@ -1056,7 +1103,7 @@ io.on("connection", (socket) => {
   });
 
   // JOIN ROOM
-  socket.on("join_room", ({ roomCode, playerData }, callback) => {
+  socket.on("join_room", async ({ roomCode, playerData }, callback) => {
     const room = rooms[roomCode];
     if (!room) {
       if (callback) callback({ success: false, error: "Room not found" });
@@ -1072,6 +1119,17 @@ io.on("connection", (socket) => {
     if (room.status === "playing") {
       if (callback) callback({ success: false, error: "Game already started" });
       return;
+    }
+
+    const betAmount = room.betAmount || 100;
+    
+    // Check and deduct coins before joining room
+    if (betAmount > 0) {
+      const deductionSuccess = await secureDeductCoins(playerData.uid, betAmount);
+      if (!deductionSuccess) {
+        if (callback) callback({ success: false, error: "Not enough coins or error deducting coins" });
+        return;
+      }
     }
 
     // Add player
@@ -1128,7 +1186,7 @@ io.on("connection", (socket) => {
   });
 
   // FIND MATCH
-  socket.on("find_match", (playerData, callback) => {
+  socket.on("find_match", async (playerData, callback) => {
     console.log("🔍 [MATCHMAKING] Searching for match for:", playerData.username);
     console.log("🔍 [MATCHMAKING] Player data:", {
       uid: playerData.uid,
@@ -1138,6 +1196,16 @@ io.on("connection", (socket) => {
     });
 
     const { mode, betAmount } = playerData;
+    
+    // Check and deduct coins before proceeding with matchmaking
+    if (betAmount > 0) {
+      const deductionSuccess = await secureDeductCoins(playerData.uid, betAmount);
+      if (!deductionSuccess) {
+        if (callback) callback({ success: false, error: "Not enough coins or error deducting coins" });
+        return;
+      }
+    }
+
     let joinedRoomCode = null;
 
     // Log current rooms for debugging
@@ -1246,10 +1314,16 @@ io.on("connection", (socket) => {
   });
 
   // CANCEL MATCHMAKING
-  socket.on("cancel_matchmaking", (roomCode) => {
+  socket.on("cancel_matchmaking", async (roomCode) => {
     const room = rooms[roomCode];
     if (room) {
       console.log(`Matchmaking cancelled for room ${roomCode}`);
+      
+      // Refund host's bet if the room is still waiting
+      if (room.status === "waiting" && room.host) {
+        await secureRefundCoins(room.host, room.betAmount || 100);
+      }
+      
       io.to(roomCode).emit("room_cancelled");
       delete rooms[roomCode];
       socket.leave(roomCode);
@@ -1257,9 +1331,14 @@ io.on("connection", (socket) => {
   });
 
   // LEAVE ROOM
-  socket.on("leave_room", ({ roomCode, playerId }) => {
+  socket.on("leave_room", async ({ roomCode, playerId }) => {
     const room = rooms[roomCode];
     if (room && room.players[playerId]) {
+      // Refund player's bet if the game hasn't started yet
+      if (room.status === "waiting") {
+        await secureRefundCoins(playerId, room.betAmount || 100);
+      }
+      
       delete room.players[playerId];
       socket.leave(roomCode);
 
