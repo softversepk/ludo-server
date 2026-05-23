@@ -1297,6 +1297,45 @@ io.on("connection", (socket) => {
       // Mark room as game_over and schedule cleanup when a winner is set
       if (gameState?.winner || gameState?.status === "game_over") {
         room.status = "game_over";
+        
+        // --- SECURE REWARD PROCESSING FOR AIR HOCKEY & SNAKE ---
+        // Since Air Hockey and Snake are physics-heavy and client-authoritative for game over,
+        // we process rewards here when the client first reports a winner.
+        if (!alreadyOver && room.betAmount) {
+          try {
+            const RewardServiceServer = require('./rewardServiceServer');
+            const winnerKey = gameState.winner; // "player1", "player2", or "draw"
+            
+            // Map room mode to GameType string for rewards
+            let gameTypeStr = 'UNKNOWN';
+            if (room.mode === 'airhockey') gameTypeStr = 'AIR_HOCKEY';
+            else if (room.mode === 'snake_vs_snake' || room.gameMode === 'snake_vs_snake') gameTypeStr = 'SNAKE';
+            
+            if (gameTypeStr !== 'UNKNOWN' && gameState.players) {
+              console.log(`🎁 [SERVER REWARDS] Processing secure rewards for ${gameTypeStr} room ${roomCode}`);
+              
+              for (const [role, uid] of Object.entries(gameState.players)) {
+                if (!uid || uid.startsWith('bot_')) continue;
+                
+                if (winnerKey === 'draw') {
+                  RewardServiceServer.awardGameDraw(uid, gameTypeStr, room.betAmount).catch(e => console.error(e));
+                } else if (role === winnerKey) {
+                  RewardServiceServer.awardGameWin(uid, gameTypeStr, room.betAmount)
+                    .then(result => {
+                      if (result && result.success) {
+                        io.to(roomCode).emit(`reward:awarded:${uid}`, result);
+                      }
+                    }).catch(e => console.error(e));
+                } else {
+                  RewardServiceServer.awardGameLoss(uid, gameTypeStr, room.betAmount).catch(e => console.error(e));
+                }
+              }
+            }
+          } catch (error) {
+            console.error('[SERVER REWARDS] Error processing rewards for physics game:', error);
+          }
+        }
+        
         scheduleRoomDelete(roomCode, 60000); // keep room 60 s for rematch
       }
 
