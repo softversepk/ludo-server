@@ -723,7 +723,7 @@ app.post('/api/game/validate-win', strictLimiter, authenticateFinancialRequest, 
   }
 });
 
-// Validate gift transaction
+// SECURE GIFT SENDING ENDPOINT
 app.post('/api/gift/send', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { fromUserId, toUserId, gift } = req.body;
@@ -737,39 +737,101 @@ app.post('/api/gift/send', strictLimiter, authenticateFinancialRequest, async (r
     }
 
     // Validate gift cost is reasonable
-    if (!gift.cost || gift.cost < 0 || gift.cost > 10000) {
+    if (!gift.cost || gift.cost < 0 || gift.cost > 100000) {
       return res.status(400).json({
         success: false,
         error: 'Invalid gift cost'
       });
     }
 
-    console.log('🎁 [SERVER-VALIDATION] Gift transaction validated:', {
+    const db = admin.firestore();
+    const senderRef = db.collection('users').doc(fromUserId);
+    const receiverRef = db.collection('users').doc(toUserId);
+    const giftRef = db.collection('gifts').doc(); // Auto-generated ID
+
+    let actualCost = gift.cost;
+
+    await db.runTransaction(async (transaction) => {
+      // 1. Validate the gift cost from the database to prevent client spoofing
+      if (gift.id) {
+        const giftItemRef = db.collection('gift_items').doc(gift.id);
+        const giftItemDoc = await transaction.get(giftItemRef);
+        if (giftItemDoc.exists) {
+          actualCost = giftItemDoc.data().cost;
+        }
+      }
+
+      if (!actualCost || actualCost < 0) {
+        throw new Error('Invalid gift cost');
+      }
+
+      // 2. Get sender
+      const senderDoc = await transaction.get(senderRef);
+      if (!senderDoc.exists) {
+        throw new Error('Sender not found');
+      }
+
+      // 3. Check coins
+      const currentCoins = senderDoc.data().coins || 0;
+      if (currentCoins < actualCost) {
+        throw new Error('Insufficient coins');
+      }
+
+      // 4. Get receiver to verify they exist
+      const receiverDoc = await transaction.get(receiverRef);
+      if (!receiverDoc.exists) {
+         throw new Error('Receiver not found');
+      }
+
+      // 5. Deduct coins from sender
+      transaction.update(senderRef, {
+        coins: admin.firestore.FieldValue.increment(-actualCost)
+      });
+
+      // 6. Update receiver's gift count
+      transaction.update(receiverRef, {
+        giftsReceived: admin.firestore.FieldValue.increment(1)
+      });
+
+      // 7. Create gift record
+      transaction.set(giftRef, {
+        fromUserId,
+        toUserId,
+        giftId: gift.id || null,
+        giftName: gift.name || null,
+        giftEmoji: gift.emoji || null,
+        giftImageUrl: gift.imageUrl || null,
+        animationUrl: gift.animationUrl || null,
+        cost: actualCost,
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+        read: false,
+        animated: false
+      });
+    });
+
+    console.log('🎁 [SERVER-SECURE] Gift sent successfully:', {
       fromUserId,
       toUserId,
       giftId: gift.id,
-      cost: gift.cost
+      cost: actualCost
     });
 
-    // TODO: Validate sender has enough coins and process transaction
-    // For now, return success for client to handle
     res.json({
       success: true,
       transaction: {
         fromUserId,
         toUserId,
         gift,
-        cost: gift.cost
+        cost: actualCost
       },
-      validated: true,
       timestamp: new Date().toISOString()
     });
 
   } catch (error) {
-    console.error('❌ [SERVER-VALIDATION] Gift validation error:', error);
+    console.error('❌ [SERVER-SECURE] Gift validation error:', error.message);
     res.status(500).json({
       success: false,
-      error: 'Server validation failed'
+      error: error.message || 'Server validation failed'
     });
   }
 });
