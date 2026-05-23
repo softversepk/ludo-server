@@ -915,6 +915,190 @@ app.post('/api/coins/transaction', strictLimiter, authenticateFinancialRequest, 
   }
 });
 
+// ==========================================
+// SECURE FRIEND REQUEST SYSTEM
+// ==========================================
+
+// Send friend request
+app.post('/api/friends/request/send', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { fromUserId, toUserId } = req.body;
+    if (!fromUserId || !toUserId) return res.status(400).json({ success: false, error: 'Missing user IDs' });
+    if (fromUserId !== req.userId) return res.status(403).json({ success: false, error: 'Unauthorized sender' });
+
+    const db = admin.firestore();
+    
+    // Check if already friends
+    const userDoc = await db.collection('users').doc(fromUserId).get();
+    const friends = userDoc.data()?.friends || [];
+    if (friends.includes(toUserId)) return res.status(400).json({ success: false, error: 'Already friends' });
+
+    // Check if target user has private account
+    const toUserDoc = await db.collection('users').doc(toUserId).get();
+    const toUserSettings = toUserDoc.data()?.settings || {};
+    if (toUserSettings.privateAccount) return res.status(400).json({ success: false, error: 'User has private account' });
+
+    // Check if request already exists
+    const existingRequests = await db.collection('friendRequests')
+      .where('fromUserId', '==', fromUserId)
+      .where('toUserId', '==', toUserId)
+      .where('status', '==', 'pending')
+      .get();
+      
+    if (!existingRequests.empty) return res.status(400).json({ success: false, error: 'Request already sent' });
+
+    // Create request and notification via batch
+    const batch = db.batch();
+    
+    const requestRef = db.collection('friendRequests').doc();
+    batch.set(requestRef, {
+      fromUserId,
+      toUserId,
+      status: 'pending',
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    const notificationRef = db.collection('notifications').doc();
+    batch.set(notificationRef, {
+      userId: toUserId,
+      type: 'friend_request',
+      fromUserId,
+      requestId: requestRef.id,
+      message: 'sent you a friend request',
+      read: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    await batch.commit();
+    res.json({ success: true, requestId: requestRef.id });
+  } catch (error) {
+    console.error('[SERVER-FRIENDS] Error sending request:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Accept friend request
+app.post('/api/friends/request/accept', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { requestId, fromUserId, toUserId } = req.body;
+    // toUserId in the request doc is the person accepting it, who should be req.userId
+    if (toUserId !== req.userId) return res.status(403).json({ success: false, error: 'Unauthorized user' });
+
+    const db = admin.firestore();
+    
+    await db.runTransaction(async (transaction) => {
+      const requestRef = db.collection('friendRequests').doc(requestId);
+      const requestDoc = await transaction.get(requestRef);
+      
+      if (!requestDoc.exists || requestDoc.data().status !== 'pending') {
+        throw new Error('Request not found or not pending');
+      }
+
+      const fromUserRef = db.collection('users').doc(fromUserId);
+      const toUserRef = db.collection('users').doc(toUserId);
+      
+      transaction.update(requestRef, {
+        status: 'accepted',
+        acceptedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+
+      transaction.update(fromUserRef, {
+        friends: admin.firestore.FieldValue.arrayUnion(toUserId)
+      });
+      
+      transaction.update(toUserRef, {
+        friends: admin.firestore.FieldValue.arrayUnion(fromUserId)
+      });
+
+      const notificationRef = db.collection('notifications').doc();
+      transaction.set(notificationRef, {
+        userId: fromUserId,
+        type: 'friend_request_accepted',
+        fromUserId: toUserId,
+        message: 'accepted your friend request',
+        read: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[SERVER-FRIENDS] Error accepting request:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Reject friend request
+app.post('/api/friends/request/reject', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { requestId, fromUserId, toUserId } = req.body;
+    if (toUserId !== req.userId) return res.status(403).json({ success: false, error: 'Unauthorized user' });
+
+    const db = admin.firestore();
+    const batch = db.batch();
+    
+    const requestRef = db.collection('friendRequests').doc(requestId);
+    batch.update(requestRef, {
+      status: 'rejected',
+      rejectedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    const notificationRef = db.collection('notifications').doc();
+    batch.set(notificationRef, {
+      userId: fromUserId,
+      type: 'friend_request_rejected',
+      fromUserId: toUserId,
+      message: 'declined your friend request',
+      read: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    await batch.commit();
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[SERVER-FRIENDS] Error rejecting request:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Remove friend
+app.post('/api/friends/remove', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { userId, friendId } = req.body;
+    if (userId !== req.userId) return res.status(403).json({ success: false, error: 'Unauthorized user' });
+
+    const db = admin.firestore();
+    const batch = db.batch();
+    
+    const userRef = db.collection('users').doc(userId);
+    const friendRef = db.collection('users').doc(friendId);
+    
+    batch.update(userRef, {
+      friends: admin.firestore.FieldValue.arrayRemove(friendId)
+    });
+    
+    batch.update(friendRef, {
+      friends: admin.firestore.FieldValue.arrayRemove(userId)
+    });
+
+    const notificationRef = db.collection('notifications').doc();
+    batch.set(notificationRef, {
+      userId: friendId,
+      type: 'friend_removed',
+      fromUserId: userId,
+      message: 'removed you from their friends list',
+      read: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    await batch.commit();
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[SERVER-FRIENDS] Error removing friend:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Server status endpoint
 app.get('/api/status', (req, res) => {
   res.json({
