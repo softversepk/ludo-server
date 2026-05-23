@@ -16,6 +16,42 @@ class ChessGameServer {
     this.setupEventHandlers();
   }
 
+  // Helper to securely deduct coins
+  async secureDeductCoins(userId, amount) {
+    if (!amount || amount <= 0) return true;
+    try {
+      const userRef = this.admin.firestore().collection('users').doc(userId);
+      return await this.admin.firestore().runTransaction(async (transaction) => {
+        const userDoc = await transaction.get(userRef);
+        if (!userDoc.exists) throw new Error('User not found');
+        const currentCoins = userDoc.data().coins || 0;
+        if (currentCoins < amount) throw new Error('Not enough coins');
+        transaction.update(userRef, {
+          coins: this.admin.firestore.FieldValue.increment(-amount)
+        });
+        return true;
+      });
+    } catch (error) {
+      console.error(`♟️ [CHESS SECURITY] Coin deduction failed for ${userId}:`, error.message);
+      return false;
+    }
+  }
+
+  // Helper to securely refund coins
+  async secureRefundCoins(userId, amount) {
+    if (!amount || amount <= 0) return true;
+    try {
+      const userRef = this.admin.firestore().collection('users').doc(userId);
+      await userRef.update({
+        coins: this.admin.firestore.FieldValue.increment(amount)
+      });
+      return true;
+    } catch (error) {
+      console.error(`♟️ [CHESS SECURITY] Coin refund failed for ${userId}:`, error.message);
+      return false;
+    }
+  }
+
   setupEventHandlers() {
     this.io.on('connection', (socket) => {
       console.log(`♟️ [CHESS] Player connected: ${socket.id}`);
@@ -36,8 +72,35 @@ class ChessGameServer {
       });
 
       // Find match
-      socket.on('chess:findMatch', (data, callback) => {
-        this.handleFindMatch(socket, data, callback);
+      socket.on('chess:findMatch', async (data, callback) => {
+        await this.handleFindMatch(socket, data, callback);
+      });
+
+      // Cancel matchmaking
+      socket.on('chess:cancelMatchmaking', async (data, callback) => {
+        const userId = data.userId || socket.userId;
+        if (userId && this.matchmakingQueue.has(userId)) {
+          const playerInQueue = this.matchmakingQueue.get(userId);
+          
+          if (playerInQueue && playerInQueue.betAmount > 0) {
+            await this.secureRefundCoins(userId, playerInQueue.betAmount);
+          }
+          
+          this.matchmakingQueue.delete(userId);
+          
+          if (this.matchmakingIntervals && this.matchmakingIntervals.has(userId)) {
+            clearInterval(this.matchmakingIntervals.get(userId));
+            this.matchmakingIntervals.delete(userId);
+          }
+          
+          if (this.aiTimeouts && this.aiTimeouts.has(userId)) {
+            clearTimeout(this.aiTimeouts.get(userId));
+            this.aiTimeouts.delete(userId);
+          }
+          
+          console.log(`♟️ [CHESS] Matchmaking cancelled for ${userId}`);
+        }
+        if (callback) callback({ success: true });
       });
 
       // Make move
@@ -88,7 +151,7 @@ class ChessGameServer {
     }
   }
 
-  handleFindMatch(socket, data, callback) {
+  async handleFindMatch(socket, data, callback) {
     const { userId, username, avatar, level, betAmount } = data;
 
     console.log(`♟️ [CHESS] ${username} searching for match (bet: ${betAmount})`);
@@ -99,6 +162,15 @@ class ChessGameServer {
       console.log(`♟️ [CHESS] Player already in queue: ${userId}`);
       if (callback) callback({ success: true, created: false, joined: false });
       return;
+    }
+
+    // Check and deduct coins before adding to queue
+    if (betAmount > 0) {
+      const deductionSuccess = await this.secureDeductCoins(userId, betAmount);
+      if (!deductionSuccess) {
+        if (callback) callback({ success: false, error: "Not enough coins or error deducting coins" });
+        return;
+      }
     }
 
     // Add to matchmaking queue with fresh socket reference
@@ -521,6 +593,17 @@ class ChessGameServer {
     
     // Remove from matchmaking queue
     if (userId) {
+      if (this.matchmakingQueue.has(userId)) {
+        const playerInQueue = this.matchmakingQueue.get(userId);
+        
+        // Refund if they paid to enter queue but disconnected before match
+        if (playerInQueue && playerInQueue.betAmount > 0) {
+          this.secureRefundCoins(userId, playerInQueue.betAmount).catch(err => 
+            console.error('Failed to refund chess matchmaking on disconnect:', err)
+          );
+        }
+      }
+      
       this.matchmakingQueue.delete(userId);
       this.userSockets.delete(userId);
       
