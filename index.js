@@ -726,7 +726,7 @@ app.post('/api/game/validate-win', strictLimiter, authenticateFinancialRequest, 
 // SECURE GIFT SENDING ENDPOINT
 app.post('/api/gift/send', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
-    const { fromUserId, toUserId, gift } = req.body;
+    const { fromUserId, toUserId, gift, roomId } = req.body;
 
     // Validate input
     if (!fromUserId || !toUserId || !gift) {
@@ -815,6 +815,26 @@ app.post('/api/gift/send', strictLimiter, authenticateFinancialRequest, async (r
       giftId: gift.id,
       cost: actualCost
     });
+
+    // Broadcast to room via socket.io if roomId is provided
+    if (roomId) {
+      const io = req.app.get('io');
+      if (io) {
+        console.log(`📡 [SOCKET] Broadcasting gift to room ${roomId}`);
+        io.to(roomId).emit('game_gift_sent', {
+          fromUserId,
+          toUserId,
+          gift: {
+            id: gift.id,
+            emoji: gift.emoji,
+            imageUrl: gift.imageUrl,
+            animationUrl: gift.animationUrl,
+            name: gift.name,
+            cost: actualCost
+          }
+        });
+      }
+    }
 
     res.json({
       success: true,
@@ -920,6 +940,9 @@ const io = new Server(server, {
   maxHttpBufferSize: 1e6, // 1MB limit for socket messages
   allowEIO3: true // For compatibility
 });
+
+// Make io accessible in API routes
+app.set('io', io);
 
 // Security: Track connections per IP
 const connectionTracker = new Map();
