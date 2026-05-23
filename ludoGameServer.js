@@ -17,6 +17,8 @@ const TOKEN_STATE = {
   FINISHED: 'finished'
 };
 
+const RewardServiceServer = require('./rewardServiceServer');
+
 class LudoGameServer {
   constructor(io, admin) {
     this.io = io;
@@ -774,7 +776,7 @@ class LudoGameServer {
   /**
    * Handle game over
    */
-  handleGameOver(room, winnerColor) {
+  async handleGameOver(room, winnerColor) {
     room.gameState.status = GAME_STATE.FINISHED;
     room.gameState.winner = winnerColor;
 
@@ -784,13 +786,35 @@ class LudoGameServer {
       timestamp: Date.now()
     });
 
-    console.log(`🏆 [GAME OVER] Winner: ${playerColor} in room ${roomId}`);
+    console.log(`🏆 [GAME OVER] Winner: ${winnerColor} in room ${room.id}`);
+
+    // Process rewards
+    try {
+      const betAmount = room.betAmount || 100;
+      for (const [color, player] of Object.entries(room.gameState.players)) {
+        if (!player || player.isBot || !player.uid) continue;
+        
+        if (color === winnerColor || (room.isTeamMode && player.team === room.gameState.players[winnerColor]?.team)) {
+          // It's a win!
+          const result = await RewardServiceServer.awardGameWin(player.uid, 'LUDO', betAmount);
+          if (result.success) {
+            // Notify the specific user about their rewards
+            this.io.to(room.id).emit(`reward:awarded:${player.uid}`, result);
+          }
+        } else {
+          // It's a loss
+          await RewardServiceServer.awardGameLoss(player.uid, 'LUDO', betAmount);
+        }
+      }
+    } catch (error) {
+      console.error('Error processing rewards in Ludo:', error);
+    }
 
       // Clear the room after a grace period so bots stop playing
       setTimeout(() => {
-        if (this.rooms.has(roomId)) {
-          this.rooms.delete(roomId);
-          console.log(`🗑️ [CLEANUP] Room ${roomId} deleted after game over`);
+        if (this.rooms.has(room.id)) {
+          this.rooms.delete(room.id);
+          console.log(`🗑️ [CLEANUP] Room ${room.id} deleted after game over`);
         }
       }, 30000);
   }
