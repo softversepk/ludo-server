@@ -281,8 +281,9 @@ class LudoGameServer {
       }
       room.gameState.lastDiceValues[player.color] = diceValue;
 
-      // Calculate valid moves
+      // Calculate valid moves passing room context for quick arrow mode
       const validMoves = this.calculateValidMoves(
+        room,
         room.gameState.players[player.color].tokens,
         diceValue,
         player.color
@@ -371,8 +372,9 @@ class LudoGameServer {
       }
       room.gameState.lastDiceValues[player.color] = diceValue;
 
-      // Calculate valid moves for the new roll
+      // Calculate valid moves passing room context for quick arrow mode
       const validMoves = this.calculateValidMoves(
+        room,
         room.gameState.players[player.color].tokens,
         diceValue,
         player.color
@@ -639,8 +641,11 @@ class LudoGameServer {
   /**
    * Calculate valid moves for current player
    */
-  calculateValidMoves(tokens, diceValue, playerColor) {
+  calculateValidMoves(room, tokens, diceValue, playerColor) {
     const validMoves = [];
+    const player = room.gameState.players[playerColor];
+    const hasKilled = player.hasKilled || false;
+    const gameMode = room.gameMode || 'classic';
 
     tokens.forEach((token, index) => {
       if (token.state === TOKEN_STATE.FINISHED) return;
@@ -655,6 +660,18 @@ class LudoGameServer {
 
       // Token on board (position here tracks steps from start 0-56)
       const newPosition = token.position + diceValue;
+      
+      // --- QUICK ARROW MODE LOGIC (BACKEND SECURED) ---
+      // In quick_arrow mode, a player CANNOT enter the home stretch (step 51+)
+      // unless they have killed at least one opponent's token.
+      if (gameMode === 'quick_arrow' && !hasKilled && newPosition >= 51) {
+        // Token is forced to loop around the board instead of entering home stretch.
+        // It's technically a valid move to keep moving around, but we must calculate 
+        // the looped steps. For simplicity, we just allow the move and handle the loop 
+        // in executeMove, but here we validate that the move itself is possible.
+        validMoves.push(index);
+        return;
+      }
       
       // Must roll exactly the number needed to finish (56 steps total)
       if (newPosition <= 56) {
@@ -672,6 +689,7 @@ class LudoGameServer {
     const player = room.gameState.players[playerColor];
     const token = player.tokens[tokenIndex];
     const diceValue = room.gameState.diceValue;
+    const gameMode = room.gameMode || 'classic';
 
     let newPosition;
     let newState = token.state;
@@ -683,6 +701,15 @@ class LudoGameServer {
       newState = TOKEN_STATE.ACTIVE;
     } else {
       newPosition = token.position + diceValue;
+
+      // Quick Arrow Mode constraint logic
+      if (gameMode === 'quick_arrow' && !player.hasKilled && newPosition >= 51) {
+        // Force the token to loop back to the start of the board
+        // newPosition tracks steps from start (0-56).
+        // 52 is the total steps around the board before home stretch.
+        // We loop it around keeping the same step format but effectively pushing it back
+        newPosition = newPosition % 52;
+      }
 
       // Check if finished (exactly 56 steps)
       if (newPosition === 56) {
@@ -700,6 +727,9 @@ class LudoGameServer {
     let killed = null;
     if (newState === TOKEN_STATE.ACTIVE) {
       killed = this.checkForKill(room, playerColor, newPosition);
+      if (killed !== null) {
+        player.hasKilled = true;
+      }
     }
 
     // Check for win
