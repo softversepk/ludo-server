@@ -3,9 +3,12 @@
  * Handles real-time chess game synchronization using Socket.io
  */
 
+const RewardServiceServer = require('./rewardServiceServer');
+
 class ChessGameServer {
-  constructor(io) {
+  constructor(io, admin) {
     this.io = io;
+    this.admin = admin;
     this.matchmakingQueue = new Map(); // userId -> player data
     this.activeGames = new Map(); // roomId -> game data
     this.userSockets = new Map(); // userId -> socketId
@@ -57,6 +60,32 @@ class ChessGameServer {
         this.handleDisconnect(socket);
       });
     });
+  }
+
+  async processRewards(game, winnerId, status = 'won') {
+    if (!game || !game.players || game.isAI) return;
+    
+    const betAmount = game.betAmount || 100;
+    const players = [game.players.white, game.players.black];
+    
+    for (const player of players) {
+      if (!player || player.uid === 'ai_bot') continue;
+      
+      try {
+        if (status === 'draw') {
+          await RewardServiceServer.awardGameDraw(player.uid, 'CHESS', betAmount);
+        } else if (player.uid === winnerId) {
+          const result = await RewardServiceServer.awardGameWin(player.uid, 'CHESS', betAmount);
+          if (result.success) {
+            this.io.to(game.roomId).emit(`reward:awarded:${player.uid}`, result);
+          }
+        } else {
+          await RewardServiceServer.awardGameLoss(player.uid, 'CHESS', betAmount);
+        }
+      } catch (error) {
+        console.error(`♟️ [CHESS] Error processing rewards for ${player.uid}:`, error);
+      }
+    }
   }
 
   handleFindMatch(socket, data, callback) {
@@ -416,6 +445,11 @@ class ChessGameServer {
       betAmount
     });
 
+    if (!game.rewardsProcessed) {
+      game.rewardsProcessed = true;
+      this.processRewards(game, winnerId);
+    }
+
     // Clean up game
     this.activeGames.delete(roomId);
     console.log(`♟️ [CHESS] Game ${roomId} ended by resignation`);
@@ -444,6 +478,11 @@ class ChessGameServer {
       betAmount
     });
 
+    if (!game.rewardsProcessed) {
+      game.rewardsProcessed = true;
+      this.processRewards(game, winnerId);
+    }
+
     // Clean up game
     this.activeGames.delete(roomId);
     console.log(`♟️ [CHESS] Game ${roomId} ended - player left`);
@@ -466,6 +505,11 @@ class ChessGameServer {
       winnerId,
       betAmount: game.betAmount
     });
+
+    if (!game.rewardsProcessed) {
+      game.rewardsProcessed = true;
+      this.processRewards(game, winnerId);
+    }
 
     // Clean up game
     this.activeGames.delete(roomId);
@@ -500,6 +544,11 @@ class ChessGameServer {
           winnerId,
           betAmount: game.betAmount
         });
+
+        if (!game.rewardsProcessed) {
+          game.rewardsProcessed = true;
+          this.processRewards(game, winnerId);
+        }
 
         this.activeGames.delete(roomId);
         console.log(`♟️ [CHESS] Game ${roomId} ended - player disconnected`);
