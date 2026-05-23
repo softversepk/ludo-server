@@ -1287,10 +1287,17 @@ io.on("connection", (socket) => {
       // Update socketId in room players
       if (rooms[roomCode].players[userId]) {
         rooms[roomCode].players[userId].socketId = socket.id;
+        rooms[roomCode].players[userId].connected = true;
       }
       console.log(
         `[AUTO-REJOIN] ${userId} rejoined room ${roomCode} on register`,
       );
+      
+      // Send current state to the reconnecting player
+      socket.emit("room_update", rooms[roomCode]);
+      if (rooms[roomCode].gameState) {
+        socket.emit("game_state_update", rooms[roomCode].gameState);
+      }
     }
   });
 
@@ -1304,10 +1311,17 @@ io.on("connection", (socket) => {
       userSockets[userId] = socket.id;
       if (room.players[userId]) {
         room.players[userId].socketId = socket.id;
+        room.players[userId].connected = true;
       }
       console.log(
         `[REJOIN] ${userId} explicitly rejoined room ${roomCode}, socket ${socket.id}`,
       );
+      
+      // Send current state to the reconnecting player
+      socket.emit("room_update", room);
+      if (room.gameState) {
+        socket.emit("game_state_update", room.gameState);
+      }
     } else {
       console.log(`[REJOIN] Room ${roomCode} not found for user ${userId}`);
     }
@@ -2117,24 +2131,33 @@ io.on("connection", (socket) => {
       );
       if (!player) continue;
 
-      delete room.players[player.uid];
-      const remainingPlayers = Object.values(room.players);
-      const hasRealPlayers = remainingPlayers.some(p => !p.isBot);
-
-      if (!hasRealPlayers) {
-        // Room is empty or only bots left — if game was in progress give a grace period so
-        // rematch / late reconnects still work; otherwise delete immediately.
-        if (room.status === "playing" || room.status === "game_over") {
+      if (room.status === "playing" || room.status === "game_over") {
+        // In-game: don't delete player, just mark disconnected so they can rejoin
+        player.connected = false;
+        
+        const remainingPlayers = Object.values(room.players);
+        const hasActiveRealPlayers = remainingPlayers.some(p => !p.isBot && p.connected !== false);
+        
+        if (!hasActiveRealPlayers) {
           scheduleRoomDelete(code, 60000);
         } else {
-          delete rooms[code];
+          io.to(code).emit("room_update", room);
         }
       } else {
-        // Reassign host if needed
-        if (room.host === player.uid) {
-          room.host = Object.keys(room.players)[0];
+        // Waiting state: safe to delete player
+        delete room.players[player.uid];
+        const remainingPlayers = Object.values(room.players);
+        const hasRealPlayers = remainingPlayers.some(p => !p.isBot);
+
+        if (!hasRealPlayers) {
+          delete rooms[code];
+        } else {
+          // Reassign host if needed
+          if (room.host === player.uid) {
+            room.host = Object.keys(room.players)[0];
+          }
+          io.to(code).emit("room_update", room);
         }
-        io.to(code).emit("room_update", room);
       }
     }
   });
