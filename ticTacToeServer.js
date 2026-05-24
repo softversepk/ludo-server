@@ -7,10 +7,11 @@ const GAME_STATE = {
 const RewardServiceServer = require('./rewardServiceServer');
 
 class TicTacToeGameServer {
-  constructor(io, roomsMap, admin) {
+  constructor(io, roomsMap, admin, userSockets) {
     this.io = io;
     this.rooms = roomsMap; // Reference to the shared rooms object in index.js
     this.admin = admin;
+    this.userSockets = userSockets || {};
   }
 
   initialize() {
@@ -33,6 +34,16 @@ class TicTacToeGameServer {
 
       const gameState = room.gameState;
       if (gameState.winner) return;
+
+      // SECURITY: Validate that the socket making the request belongs to the claimed playerRole
+      const playerId = gameState.players[playerRole];
+      if (!playerId) return;
+
+      const expectedSocketId = this.userSockets[playerId] || (room.players[playerId] && room.players[playerId].socketId);
+      if (expectedSocketId && socket.id !== expectedSocketId) {
+        console.warn(`[TicTacToe] Security Alert: Socket ${socket.id} attempted to resign for player ${playerId} (role ${playerRole}) but expected socket ${expectedSocketId}`);
+        return;
+      }
 
       gameState.playerLeft = playerRole;
       gameState.winner = playerRole === 'X' ? 'O' : 'X';
@@ -113,6 +124,20 @@ class TicTacToeGameServer {
       if (gameState.winner) return; // Game already over
       if (gameState.board[index] !== null) return; // Cell already taken
       
+      // SECURITY: Validate that the socket making the move belongs to the claimed playerRole
+      const playerId = gameState.players[playerRole];
+      if (!playerId) {
+        console.warn(`[TicTacToe] Player ID not found for role ${playerRole}`);
+        return;
+      }
+
+      // Allow if the socket matches the user's registered socket, OR if the socket matches the player's stored socketId
+      const expectedSocketId = this.userSockets[playerId] || (room.players[playerId] && room.players[playerId].socketId);
+      if (expectedSocketId && socket.id !== expectedSocketId) {
+        console.warn(`[TicTacToe] Security Alert: Socket ${socket.id} attempted to move for player ${playerId} (role ${playerRole}) but expected socket ${expectedSocketId}`);
+        return;
+      }
+      
       // Check turn
       const expectedRole = gameState.xIsNext ? 'X' : 'O';
       if (playerRole !== expectedRole) {
@@ -163,6 +188,23 @@ class TicTacToeGameServer {
 
       const gameState = room.gameState;
       if (gameState.winner) return;
+
+      // SECURITY: Validate that the socket making the request is a player in the room
+      let isPlayerInRoom = false;
+      for (const [playerId, player] of Object.entries(room.players)) {
+        if (!player.isBot) {
+          const expectedSocketId = this.userSockets[playerId] || player.socketId;
+          if (expectedSocketId === socket.id) {
+            isPlayerInRoom = true;
+            break;
+          }
+        }
+      }
+      
+      if (!isPlayerInRoom) {
+        console.warn(`[TicTacToe] Security Alert: Unauthorized socket ${socket.id} attempted to trigger bot in room ${roomId}`);
+        return;
+      }
 
       // Find empty spots
       const emptyIndices = gameState.board
