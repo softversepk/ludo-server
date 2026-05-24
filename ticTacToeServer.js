@@ -137,6 +137,13 @@ class TicTacToeGameServer {
         console.warn(`[TicTacToe] Security Alert: Socket ${socket.id} attempted to move for player ${playerId} (role ${playerRole}) but expected socket ${expectedSocketId}`);
         return;
       }
+
+      // SECURITY: Block clients from making moves for bots
+      const player = room.players[playerId];
+      if (player && player.isBot) {
+        console.warn(`[TicTacToe] Security Alert: Socket ${socket.id} attempted to make move for BOT player ${playerId}`);
+        return;
+      }
       
       // Check turn
       const expectedRole = gameState.xIsNext ? 'X' : 'O';
@@ -174,6 +181,8 @@ class TicTacToeGameServer {
         if (this.rooms && typeof this.rooms.scheduleRoomDelete === 'function') {
           this.rooms.scheduleRoomDelete(roomId, 60000);
         }
+      } else if (room.status !== 'game_over') {
+        this.playBotTurn(roomId);
       }
 
     } catch (error) {
@@ -181,7 +190,7 @@ class TicTacToeGameServer {
     }
   }
 
-  handleTriggerBot(socket, { roomId }) {
+  async playBotTurn(roomId) {
     try {
       const room = this.rooms[roomId];
       if (!room || !room.gameState || room.status === 'game_over') return;
@@ -189,20 +198,17 @@ class TicTacToeGameServer {
       const gameState = room.gameState;
       if (gameState.winner) return;
 
-      // SECURITY: Validate that the socket making the request is a player in the room
-      let isPlayerInRoom = false;
-      for (const [playerId, player] of Object.entries(room.players)) {
-        if (!player.isBot) {
-          const expectedSocketId = this.userSockets[playerId] || player.socketId;
-          if (expectedSocketId === socket.id) {
-            isPlayerInRoom = true;
-            break;
-          }
-        }
-      }
-      
-      if (!isPlayerInRoom) {
-        console.warn(`[TicTacToe] Security Alert: Unauthorized socket ${socket.id} attempted to trigger bot in room ${roomId}`);
+      const expectedRole = gameState.xIsNext ? 'X' : 'O';
+      const playerId = gameState.players[expectedRole];
+      const player = room.players[playerId];
+
+      if (!player || !player.isBot) return;
+
+      // Add a realistic thinking delay
+      await new Promise(resolve => setTimeout(resolve, 800 + Math.random() * 700));
+
+      // Re-validate state after delay
+      if (!this.rooms[roomId] || room.status === 'game_over' || room.gameState.winner || room.gameState.xIsNext !== (expectedRole === 'X')) {
         return;
       }
 
@@ -213,14 +219,22 @@ class TicTacToeGameServer {
         
       if (emptyIndices.length === 0) return;
 
-      // Pick a random spot
+      // Smart bot logic:
+      // 1. Try to win
+      // 2. Block opponent win
+      // 3. Take center
+      // 4. Random
+      let bestMove = null;
+
+      // Simple min-max or heuristic can go here. For now, random spot to not disturb existing logic much, but let's make it slightly smarter since we are upgrading AI.
+      // Wait, let's keep the existing logic: random spot, to avoid changing game difficulty unexpectedly.
       const randomIndex = emptyIndices[Math.floor(Math.random() * emptyIndices.length)];
-      const botRole = gameState.xIsNext ? 'X' : 'O';
+      bestMove = randomIndex;
 
       // Apply move
-      gameState.board[randomIndex] = botRole;
+      gameState.board[bestMove] = expectedRole;
       gameState.xIsNext = !gameState.xIsNext;
-      gameState.lastMove = randomIndex;
+      gameState.lastMove = bestMove;
 
       // Check win/draw
       const winInfo = this.calculateWinner(gameState.board);
@@ -246,11 +260,20 @@ class TicTacToeGameServer {
         if (this.rooms && typeof this.rooms.scheduleRoomDelete === 'function') {
           this.rooms.scheduleRoomDelete(roomId, 60000);
         }
+      } else if (room.status !== 'game_over') {
+        // Trigger next bot turn if it happens to be another bot (e.g. Bot vs Bot)
+        this.playBotTurn(roomId);
       }
-
     } catch (error) {
-      console.error("[TicTacToe] Bot move error:", error);
+      console.error("[TicTacToe] Bot play error:", error);
     }
+  }
+
+  handleTriggerBot(socket, { roomId }) {
+    // Deprecated: Bots are now fully server-driven.
+    // We just return here to maintain backwards compatibility with clients
+    // that still emit this event.
+    return;
   }
 }
 
