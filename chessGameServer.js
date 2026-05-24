@@ -108,6 +108,50 @@ class ChessGameServer {
         this.handleMakeMove(socket, data, callback);
       });
 
+      // Trigger Bot
+      socket.on('chess:trigger_bot', (data) => {
+        this.handleTriggerBot(socket, data);
+      });
+
+      // Get AI move for local games
+      socket.on('chess:get_ai_move', (data, callback) => {
+        try {
+          const { gameState } = data;
+          const { getLegalMoves, movePiece, isCheckmate } = require('./utils/chessLogic');
+          const { pieces, currentTurn } = gameState;
+          
+          const aiPieces = pieces.filter((p) => p.color === currentTurn);
+          const allMoves = [];
+          aiPieces.forEach((piece) => {
+            const moves = getLegalMoves(piece, pieces);
+            moves.forEach((move) => {
+              allMoves.push({ piece, move });
+            });
+          });
+
+          if (allMoves.length === 0) {
+            if (callback) callback({ success: false, error: 'No valid moves' });
+            return;
+          }
+
+          const randomMove = allMoves[Math.floor(Math.random() * allMoves.length)];
+          const newState = movePiece(
+            gameState,
+            randomMove.piece.position,
+            randomMove.move
+          );
+
+          if (isCheckmate(newState.pieces, newState.currentTurn)) {
+            newState.isCheckmate = true;
+          }
+
+          if (callback) callback({ success: true, newState });
+        } catch (error) {
+          console.error('Error generating local AI move:', error);
+          if (callback) callback({ success: false, error: error.message });
+        }
+      });
+
       // Resign game
       socket.on('chess:resign', (data, callback) => {
         this.handleResign(socket, data, callback);
@@ -501,6 +545,72 @@ class ChessGameServer {
     // Check for checkmate
     if (gameState.isCheckmate) {
       this.handleGameEnd(roomId, gameState);
+    }
+  }
+
+  handleTriggerBot(socket, { roomId }) {
+    try {
+      const game = this.activeGames.get(roomId);
+      if (!game || !game.gameState) return;
+
+      const { pieces, currentTurn } = game.gameState;
+
+      // Ensure it's actually AI's turn
+      const whitePlayer = game.players.white;
+      const blackPlayer = game.players.black;
+      
+      const isAITurn = (currentTurn === 'white' && whitePlayer.isAI) || 
+                       (currentTurn === 'black' && blackPlayer.isAI);
+                       
+      if (!isAITurn) return;
+
+      const { getLegalMoves, movePiece, isCheckmate } = require('./utils/chessLogic');
+
+      // Get all AI pieces
+      const aiPieces = pieces.filter((p) => p.color === currentTurn);
+
+      // Get all possible moves
+      const allMoves = [];
+      aiPieces.forEach((piece) => {
+        const moves = getLegalMoves(piece, pieces);
+        moves.forEach((move) => {
+          allMoves.push({ piece, move });
+        });
+      });
+
+      if (allMoves.length === 0) return;
+
+      // Pick random move (simple AI)
+      const randomMove = allMoves[Math.floor(Math.random() * allMoves.length)];
+      const newState = movePiece(
+        game.gameState,
+        randomMove.piece.position,
+        randomMove.move
+      );
+
+      // Update game state
+      game.gameState = newState;
+      game.lastUpdate = Date.now();
+
+      // Check for checkmate BEFORE broadcasting
+      if (isCheckmate(newState.pieces, newState.currentTurn)) {
+        newState.isCheckmate = true;
+      }
+
+      // Broadcast to players
+      this.io.to(roomId).emit('chess:gameUpdate', {
+        gameState: newState,
+        timestamp: Date.now()
+      });
+
+      console.log(`♟️ [CHESS] AI Move in ${roomId}: ${newState.lastMove?.from} -> ${newState.lastMove?.to}`);
+
+      if (newState.isCheckmate) {
+        this.handleGameEnd(roomId, newState);
+      }
+
+    } catch (error) {
+      console.error("[CHESS] AI move error:", error);
     }
   }
 
