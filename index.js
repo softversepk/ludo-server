@@ -1219,7 +1219,7 @@ const chessGameServer = new ChessGameServer(io, admin);
 console.log("✅ Chess Game Server initialized with real-time Socket.IO sync");
 
 // Initialize Tic Tac Toe Game Server
-const ticTacToeGameServer = new TicTacToeGameServer(io, rooms, admin);
+const ticTacToeGameServer = new TicTacToeGameServer(io, rooms, admin, userSockets);
 ticTacToeGameServer.initialize();
 
 console.log("✅ Tic Tac Toe Game Server initialized with Authoritative Model");
