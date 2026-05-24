@@ -18,6 +18,8 @@ const TOKEN_STATE = {
 };
 
 const RewardServiceServer = require('./rewardServiceServer');
+const { getAIMove, getAIThinkingDelay } = require('./utils/aiPlayer');
+const { AI_DIFFICULTY } = require('./utils/gameConstants');
 
 class LudoGameServer {
   constructor(io, admin) {
@@ -238,9 +240,143 @@ class LudoGameServer {
       });
 
       console.log(`✅ [START] Game started. Turn order: ${room.gameState.turnOrder.join(' → ')}`);
+
+      // Trigger bot turn if first player is a bot
+      this.playBotTurn(roomId);
     } catch (error) {
       console.error('❌ [START ERROR]', error);
       socket.emit('ludo:start_error', { error: error.message });
+    }
+  }
+
+  /**
+   * Handle AI bot turn automatically
+   */
+  async playBotTurn(roomId) {
+    const room = this.rooms.get(roomId);
+    if (!room || room.gameState.status === GAME_STATE.FINISHED) return;
+
+    const currentColor = room.gameState.currentPlayer;
+    const player = Object.values(room.players).find(p => p.color === currentColor);
+    
+    // Check if the current player is actually a bot
+    if (!player || !player.isBot) return;
+
+    // Optional: Determine AI difficulty based on room settings or default
+    const difficulty = room.aiDifficulty || AI_DIFFICULTY.MEDIUM;
+    const gameMode = room.mode || 'classic';
+
+    try {
+      // 1. ROLLING STATE
+      if (room.gameState.status === GAME_STATE.ROLLING) {
+        // Simulate thinking before rolling
+        await new Promise(resolve => setTimeout(resolve, getAIThinkingDelay(difficulty)));
+
+        // Double check room state hasn't changed during delay
+        if (!this.rooms.has(roomId) || room.gameState.status !== GAME_STATE.ROLLING || room.gameState.currentPlayer !== currentColor) return;
+
+        // Roll dice
+        const diceValue = Math.floor(Math.random() * 6) + 1;
+        room.gameState.diceValue = diceValue;
+        room.gameState.lastDiceRoll = Date.now();
+
+        if (!room.gameState.lastDiceValues) {
+          room.gameState.lastDiceValues = {};
+        }
+        room.gameState.lastDiceValues[currentColor] = diceValue;
+
+        // Calculate valid moves
+        const validMoves = this.calculateValidMoves(
+          room,
+          room.gameState.players[currentColor].tokens,
+          diceValue,
+          currentColor
+        );
+
+        if (validMoves.length > 0) {
+          room.gameState.status = GAME_STATE.MOVING;
+          room.gameState.validMoves = validMoves;
+          
+          this.broadcastDeltaUpdate(roomId, {
+            type: 'dice_roll',
+            playerColor: currentColor,
+            diceValue,
+            validMoves,
+            status: GAME_STATE.MOVING,
+            timestamp: Date.now()
+          });
+
+          // Trigger the moving part of the bot's turn
+          this.playBotTurn(roomId);
+        } else {
+          // No valid moves, skip turn
+          this.broadcastDeltaUpdate(roomId, {
+            type: 'dice_roll',
+            playerColor: currentColor,
+            diceValue,
+            validMoves: [],
+            status: GAME_STATE.ROLLING,
+            timestamp: Date.now()
+          });
+
+          await new Promise(resolve => setTimeout(resolve, 1000)); // Show dice result briefly
+          this.skipTurn(room, currentColor, diceValue);
+        }
+      } 
+      // 2. MOVING STATE
+      else if (room.gameState.status === GAME_STATE.MOVING) {
+        // Simulate thinking before moving
+        await new Promise(resolve => setTimeout(resolve, getAIThinkingDelay(difficulty)));
+
+        // Double check room state
+        if (!this.rooms.has(roomId) || room.gameState.status !== GAME_STATE.MOVING || room.gameState.currentPlayer !== currentColor) return;
+
+        const diceValue = room.gameState.diceValue;
+        
+        // Use AI logic to pick best move
+        const tokenIndex = getAIMove(
+          room.gameState.players[currentColor].tokens,
+          diceValue,
+          currentColor,
+          room.gameState.players,
+          difficulty,
+          gameMode
+        );
+
+        if (tokenIndex !== null && room.gameState.validMoves.includes(tokenIndex)) {
+          const moveResult = this.executeMove(room, currentColor, tokenIndex);
+
+          this.broadcastDeltaUpdate(roomId, {
+            type: 'token_move',
+            playerColor: currentColor,
+            tokenIndex,
+            newPosition: moveResult.newPosition,
+            newState: moveResult.newState,
+            killed: moveResult.killed,
+            bonusTurn: moveResult.bonusTurn,
+            won: moveResult.won,
+            currentPlayer: room.gameState.currentPlayer,
+            status: room.gameState.status,
+            timestamp: Date.now()
+          });
+
+          console.log(`🤖 [BOT MOVE] ${currentColor} moved token ${tokenIndex} to ${moveResult.newPosition}`);
+
+          if (moveResult.won) {
+            this.handleGameOver(room, currentColor);
+          } else if (room.gameState.currentPlayer === currentColor) {
+             // Bot got a bonus turn, play again
+             this.playBotTurn(roomId);
+          }
+        } else {
+          // Fallback if AI fails to pick a valid move
+          this.skipTurn(room, currentColor, diceValue);
+        }
+      }
+    } catch (error) {
+      console.error('❌ [BOT ERROR]', error);
+      // Failsafe: skip turn on error so game doesn't hang
+      this.skipTurn(room, currentColor, room.gameState.diceValue || 1);
     }
   }
 
@@ -440,6 +576,12 @@ class LudoGameServer {
         return;
       }
 
+      // SECURITY: Block clients from moving for bots
+      if (player.isBot) {
+        console.warn(`[Ludo] Security Alert: Socket ${socket.id} attempted to move token for BOT player ${playerId}`);
+        return;
+      }
+
       // Validate: Is it this player's turn?
       if (player.color !== room.gameState.currentPlayer) {
         socket.emit('ludo:action_error', { error: 'Not your turn' });
@@ -503,6 +645,12 @@ class LudoGameServer {
       const expectedSocketId = player.socketId;
       if (expectedSocketId && socket.id !== expectedSocketId) {
         console.warn(`[Ludo] Security Alert: Socket ${socket.id} attempted to skip turn for player ${playerId} but expected socket ${expectedSocketId}`);
+        return;
+      }
+
+      // SECURITY: Block clients from skipping turns for bots
+      if (player.isBot) {
+        console.warn(`[Ludo] Security Alert: Socket ${socket.id} attempted to skip turn for BOT player ${playerId}`);
         return;
       }
 
@@ -816,6 +964,7 @@ class LudoGameServer {
       this.nextTurn(room);
     } else {
       room.gameState.status = GAME_STATE.ROLLING;
+      this.playBotTurn(room.id); // Trigger in case the bot rolled 6 but couldn't move
     }
   }
 
@@ -829,6 +978,9 @@ class LudoGameServer {
     room.gameState.status = GAME_STATE.ROLLING;
     room.gameState.diceValue = null;
     room.gameState.validMoves = [];
+    
+    // Check and trigger bot turn
+    this.playBotTurn(room.id);
   }
 
   /**
