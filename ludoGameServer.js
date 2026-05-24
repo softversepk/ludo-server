@@ -255,6 +255,13 @@ class LudoGameServer {
       const player = room.players[playerId];
       if (!player) return;
 
+      // SECURITY: Validate that the socket making the request belongs to the player
+      const expectedSocketId = player.socketId;
+      if (expectedSocketId && socket.id !== expectedSocketId) {
+        console.warn(`[Ludo] Security Alert: Socket ${socket.id} attempted to roll dice for player ${playerId} but expected socket ${expectedSocketId}`);
+        return;
+      }
+
       // Validate: Is it this player's turn?
       if (player.color !== room.gameState.currentPlayer) {
         socket.emit('ludo:action_error', {
@@ -324,6 +331,13 @@ class LudoGameServer {
 
       const player = room.players[playerId];
       if (!player) return;
+
+      // SECURITY: Validate that the socket making the request belongs to the player
+      const expectedSocketId = player.socketId;
+      if (expectedSocketId && socket.id !== expectedSocketId) {
+        console.warn(`[Ludo] Security Alert: Socket ${socket.id} attempted to undo roll for player ${playerId} but expected socket ${expectedSocketId}`);
+        return;
+      }
 
       // Validate: Is it this player's turn?
       if (player.color !== room.gameState.currentPlayer) {
@@ -418,6 +432,13 @@ class LudoGameServer {
 
       const player = room.players[playerId];
       if (!player) return;
+
+      // SECURITY: Validate that the socket making the request belongs to the player
+      const expectedSocketId = player.socketId;
+      if (expectedSocketId && socket.id !== expectedSocketId) {
+        console.warn(`[Ludo] Security Alert: Socket ${socket.id} attempted to move token for player ${playerId} but expected socket ${expectedSocketId}`);
+        return;
+      }
 
       // Validate: Is it this player's turn?
       if (player.color !== room.gameState.currentPlayer) {
