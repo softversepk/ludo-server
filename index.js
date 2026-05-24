@@ -1723,8 +1723,33 @@ io.on("connection", (socket) => {
       room.gameState.strikers[playerKey] = { x, y };
       // Broadcast only the paddle move to others to save bandwidth
       socket.to(roomCode).emit("opponent_paddle_move", { playerKey, x, y });
-    } else {
-      // console.log('Paddle move ignored - Room/State not ready', roomCode);
+    }
+  });
+
+  // SECURE LUDO AI MOVE
+  socket.on("get_ai_move", ({ roomCode, gameState, difficulty, gameMode, targetPlayerForAI }, callback) => {
+    try {
+      const diceValue = Math.floor(Math.random() * 6) + 1;
+      const { getAIMove } = require('./utils/aiPlayer');
+      
+      const allPlayers = gameState.players;
+      let tokenIndex = null;
+      
+      if (allPlayers && allPlayers[targetPlayerForAI]) {
+        tokenIndex = getAIMove(
+          allPlayers[targetPlayerForAI].tokens,
+          diceValue,
+          targetPlayerForAI,
+          allPlayers,
+          difficulty,
+          gameMode
+        );
+      }
+      
+      if (callback) callback({ success: true, diceValue, tokenIndex });
+    } catch (err) {
+      console.error('Error generating AI move on server:', err);
+      if (callback) callback({ success: false, error: err.message });
     }
   });
 
