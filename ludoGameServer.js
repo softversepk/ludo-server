@@ -499,6 +499,13 @@ class LudoGameServer {
       const player = room.players[playerId];
       if (!player || player.color !== room.gameState.currentPlayer) return;
 
+      // SECURITY: Validate that the socket making the request belongs to the player
+      const expectedSocketId = player.socketId;
+      if (expectedSocketId && socket.id !== expectedSocketId) {
+        console.warn(`[Ludo] Security Alert: Socket ${socket.id} attempted to skip turn for player ${playerId} but expected socket ${expectedSocketId}`);
+        return;
+      }
+
       this.skipTurn(room, player.color, room.gameState.diceValue);
 
       this.broadcastDeltaUpdate(roomId, {
