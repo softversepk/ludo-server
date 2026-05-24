@@ -8,36 +8,9 @@ const {
     PLAYER_POSITIONS,
     TOKEN_STATE,
  } = require('./gameConstants');
-const { 
-    calculateNewPosition,
-    checkForKill,
-    getValidMoves,
-    hasTokenFinished,
-    isSafeZone,
- } = require('./gameLogic');
+const gameLogic = require('./gameLogic');
 
-/**
- * Helper to generate unique AI names and avatars
- */
-exports.getUniqueAIPlayers = (count) => {
-  const aiNames = [
-    "Computer",
-    "Bot Alpha",
-    "Bot Beta",
-    "Deep Blue",
-    "AlphaGo",
-    "ChessMaster",
-    "LudoKing",
-  ];
-  return Array.from({ length: count }, (_, i) => {
-    const name = aiNames[i % aiNames.length];
-    return {
-      name,
-      // Using helper API for consistent avatars
-      avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=random&color=fff&size=200`,
-    };
-  });
-};
+
 
 /**
  * Calculate distance to home for a token
@@ -56,7 +29,7 @@ const getDistanceToHome = (position, playerColor) => {
  * Check if a position is threatened by opponents
  */
 const isPositionThreatened = (position, allPlayers, currentPlayerColor, gameMode = 'classic') => {
-  if (position < 0 || position >= 100 || isSafeZone(position)) return false;
+  if (position < 0 || position >= 100 || gameLogic.isSafeZone(position)) return false;
 
   for (const [color, player] of Object.entries(allPlayers)) {
     if (color === currentPlayerColor) continue;
@@ -67,7 +40,7 @@ const isPositionThreatened = (position, allPlayers, currentPlayerColor, gameMode
       // Check if opponent can reach this position with any dice roll
       for (let dice = 1; dice <= 6; dice++) {
         // FIX: pass stepsFromStart and extract numeric position from result object
-        const result = calculateNewPosition(
+        const result = gameLogic.calculateNewPosition(
           token.position,
           dice,
           color,
@@ -123,7 +96,7 @@ const scoreMove = (
 
   // FIX: pass stepsFromStart so home-stretch detection works.
   // Extract numeric position from the returned object for all comparisons.
-  const newPositionData = calculateNewPosition(
+  const newPositionData = gameLogic.calculateNewPosition(
     token.position,
     diceValue,
     playerColor,
@@ -137,13 +110,13 @@ const scoreMove = (
       : newPositionData;
 
   // === PRIORITY 1: Finishing moves (highest priority) ===
-  if (hasTokenFinished(newPosition)) {
+  if (gameLogic.hasTokenFinished(newPosition)) {
     // hasTokenFinished expects a number
     score += 1000;
   }
 
   // === PRIORITY 2: Killing opponent tokens ===
-  const killTarget = checkForKill(newPosition, allPlayers, playerColor); // numeric
+  const killTarget = gameLogic.checkForKill(newPosition, allPlayers, playerColor); // numeric
   if (killTarget) {
     const targetToken =
       allPlayers[killTarget.color].tokens[killTarget.tokenIndex];
@@ -169,7 +142,7 @@ const scoreMove = (
 
     // In hard mode, consider if start position is safe
     if (difficulty === AI_DIFFICULTY.HARD) {
-      const startCell = PLAYER_POSITIONS[playerColor].startCell;
+      const startCell = PLAYER_POSITIONS[playerColor.toUpperCase()].startCell;
       if (isPositionThreatened(startCell, allPlayers, playerColor, gameMode)) {
         score -= 100; // Risky to come out
       }
@@ -182,7 +155,7 @@ const scoreMove = (
   }
 
   // === PRIORITY 5: Moving to safe zones ===
-  if (isSafeZone(newPosition) && token.state === TOKEN_STATE.ACTIVE) {
+  if (gameLogic.isSafeZone(newPosition) && token.state === TOKEN_STATE.ACTIVE) {
     score += 150;
 
     // Extra value if currently threatened
@@ -259,7 +232,7 @@ const scoreMove = (
       const ownTokensAtPosition = allPlayers[playerColor].tokens.filter(
         (t) => t.position === newPosition && t.state === TOKEN_STATE.ACTIVE,
       ).length;
-      if (ownTokensAtPosition > 0 && !isSafeZone(newPosition)) {
+      if (ownTokensAtPosition > 0 && !gameLogic.isSafeZone(newPosition)) {
         score -= 30;
       }
       break;
@@ -279,7 +252,8 @@ exports.getAIMove = (
   difficulty = AI_DIFFICULTY.MEDIUM,
   gameMode = 'classic'
 ) => {
-  const validMoves = getValidMoves(tokens, diceValue, playerColor, gameMode, allPlayers[playerColor]?.hasKilled || false);
+  const validMoves = gameLogic.getValidMoves(tokens, diceValue, playerColor, gameMode, 
+    allPlayers[playerColor]?.hasKilled || false);
 
   if (validMoves.length === 0) return null;
   if (validMoves.length === 1) return validMoves[0].index;
