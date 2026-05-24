@@ -1633,6 +1633,54 @@ io.on("connection", (socket) => {
   socket.on("update_game_state", ({ roomCode, gameState }, callback) => {
     const room = rooms[roomCode];
     if (room) {
+      // SECURITY: Block unauthorized state updates
+      const senderId = Object.keys(userSockets).find(key => userSockets[key] === socket.id);
+      
+      // If it's a bot's turn (or was just a bot's turn), only the host can update the state
+      if (room.gameState && room.gameState.currentPlayer) {
+        const previousPlayerId = room.players[room.gameState.currentPlayer]?.uid;
+        const previousPlayerIsBot = room.players[room.gameState.currentPlayer]?.isBot || String(previousPlayerId).startsWith('bot_');
+        
+        // If the update is attempting to modify a bot's state, verify the sender is the host
+        if (previousPlayerIsBot && senderId && senderId !== room.host) {
+          console.warn(`[SECURITY] Blocked unauthorized bot state update from non-host ${senderId} in room ${roomCode}`);
+          if (callback) callback({ success: false, error: "Unauthorized state update" });
+          return;
+        }
+
+        // Additional security: verify the bot's move matches what the server generated
+        if (previousPlayerIsBot && room.expectedBotMove) {
+          const expected = room.expectedBotMove;
+          // Verify dice value
+          if (gameState.lastDiceValues && gameState.lastDiceValues[room.gameState.currentPlayer]) {
+            const clientDice = gameState.lastDiceValues[room.gameState.currentPlayer];
+            if (clientDice !== expected.diceValue) {
+               console.warn(`[SECURITY] Blocked hacked bot dice roll in room ${roomCode}. Expected ${expected.diceValue}, got ${clientDice}`);
+               if (callback) callback({ success: false, error: "Invalid bot move" });
+               return;
+            }
+          }
+          
+          // Verify token moved
+          const oldTokens = room.gameState.players?.[expected.playerColor]?.tokens;
+          const newTokens = gameState.players?.[expected.playerColor]?.tokens;
+          if (oldTokens && newTokens && expected.tokenIndex !== null) {
+            // Check if any token other than the expected one moved
+            for (let i = 0; i < oldTokens.length; i++) {
+              if (i !== expected.tokenIndex && oldTokens[i].position !== newTokens[i].position) {
+                // Wait, if it's not the expected token but its position changed, the host hacked the move!
+                // Exception: token was killed by another token (but bots only move their own tokens on their turn)
+                if (newTokens[i].position > oldTokens[i].position) { // It moved forward
+                  console.warn(`[SECURITY] Blocked hacked bot token move in room ${roomCode}. Expected token ${expected.tokenIndex}, but token ${i} moved.`);
+                  if (callback) callback({ success: false, error: "Invalid bot move" });
+                  return;
+                }
+              }
+            }
+          }
+        }
+      }
+
       // If the game already has a winner recorded on the server, ignore further
       // updates silently — they are late-arriving moves from game loops.
       const alreadyOver =
@@ -1745,6 +1793,17 @@ io.on("connection", (socket) => {
           gameMode
         );
       }
+
+      // SECURITY: Store the generated move on the server to prevent hacked clients from altering it
+      const room = rooms[roomCode];
+      if (room) {
+        room.expectedBotMove = {
+          playerColor: targetPlayerForAI,
+          diceValue,
+          tokenIndex,
+          timestamp: Date.now()
+        };
+      }
       
       if (callback) callback({ success: true, diceValue, tokenIndex });
     } catch (err) {
@@ -1774,6 +1833,11 @@ io.on("connection", (socket) => {
       room.startedAt = Date.now();
       io.to(roomCode).emit("room_update", room); // To update status
       io.to(roomCode).emit("game_state_update", gameState); // Initial state
+
+      // Trigger bot turn if the first player is a bot in Tic Tac Toe
+      if (room.mode === "tictactoe" && ticTacToeGameServer) {
+        ticTacToeGameServer.playBotTurn(roomCode);
+      }
     } else {
       console.log(`[SERVER] Start game failed - room ${roomCode} not found`);
     }
