@@ -1137,7 +1137,8 @@ class LudoGameServer {
       lastDiceValues: room.gameState.lastDiceValues,
       validMoves: room.gameState.validMoves,
       players: room.gameState.players,
-      winner: room.gameState.winner
+      winner: room.gameState.winner,
+      winners: room.gameState.winners || []
     };
   }
 
