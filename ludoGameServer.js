@@ -1028,6 +1028,9 @@ class LudoGameServer {
       });
       console.log(`🏆 [PLAYER WON] ${playerColor} got position ${room.gameState.winners.length} in room ${room.id}. Game continues for ${totalPlayers - room.gameState.winners.length} players.`);
       
+      // Update room state to client so profile ranks update immediately
+      this.broadcastRoomUpdate(room.id);
+      
       // Pass turn to next player
       this.nextTurn(room);
     }
@@ -1156,6 +1159,15 @@ class LudoGameServer {
   getPlayersInfo(room) {
     const playersInfo = {};
     for (const [id, player] of Object.entries(room.players)) {
+      // Determine player's rank/position if they have won
+      let rank = null;
+      if (room.gameState.winners && room.gameState.winners.includes(player.color)) {
+        rank = room.gameState.winners.indexOf(player.color) + 1; // 1st, 2nd, 3rd
+      } else if (room.gameState.status === GAME_STATE.FINISHED && room.gameState.winners) {
+        // If game is finished and they are not in winners, they are the last
+        rank = room.gameState.turnOrder.length; 
+      }
+
       playersInfo[id] = {
         id: player.id,
         name: player.name,
@@ -1164,7 +1176,8 @@ class LudoGameServer {
         selectedToken: player.selectedToken || 'classic',
         selectedDice: player.selectedDice || 'classic',
         ready: player.ready,
-        connected: player.connected
+        connected: player.connected,
+        rank: rank
       };
     }
     return playersInfo;
