@@ -1000,7 +1000,7 @@ class LudoGameServer {
    */
   handlePlayerWin(room, playerColor) {
     const gameMode = room.gameMode || room.mode || 'classic';
-    const totalPlayers = room.gameState.turnOrder.length;
+    const totalPlayers = room.maxPlayers || Object.keys(room.players).length || room.gameState.turnOrder.length;
     
     if (!room.gameState.winners) {
       room.gameState.winners = [];
@@ -1026,7 +1026,7 @@ class LudoGameServer {
         position: room.gameState.winners.length,
         timestamp: Date.now()
       });
-      console.log(`🏆 [PLAYER WON] ${playerColor} got position ${room.gameState.winners.length} in room ${room.id}`);
+      console.log(`🏆 [PLAYER WON] ${playerColor} got position ${room.gameState.winners.length} in room ${room.id}. Game continues for ${totalPlayers - room.gameState.winners.length} players.`);
       
       // Pass turn to next player
       this.nextTurn(room);
