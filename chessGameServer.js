@@ -466,6 +466,15 @@ class ChessGameServer {
       return;
     }
 
+    // SECURITY: Validate that the socket making the request belongs to one of the players
+    const whiteSocketId = game.players.white.socketId;
+    const blackSocketId = game.players.black.socketId;
+    if (socket.id !== whiteSocketId && socket.id !== blackSocketId) {
+      console.warn(`[CHESS] Security Alert: Unauthorized socket ${socket.id} attempted to move in room ${roomId}`);
+      if (callback) callback({ error: 'Unauthorized move' });
+      return;
+    }
+
     // Initialize game state if this is the first move/sync
     if (!game.gameState) {
       game.gameState = gameState;
@@ -505,6 +514,21 @@ class ChessGameServer {
       return;
     }
 
+    // SECURITY: Validate that the socket belongs to the resigning player
+    const resigningPlayer = game.players.white.uid === resigningPlayerId ? game.players.white : 
+                            game.players.black.uid === resigningPlayerId ? game.players.black : null;
+    
+    if (!resigningPlayer) {
+      if (callback) callback({ error: 'Player not found' });
+      return;
+    }
+
+    if (resigningPlayer.socketId && socket.id !== resigningPlayer.socketId) {
+      console.warn(`[CHESS] Security Alert: Socket ${socket.id} attempted to resign for player ${resigningPlayerId} but expected socket ${resigningPlayer.socketId}`);
+      if (callback) callback({ error: 'Unauthorized resign' });
+      return;
+    }
+
     // Determine winner
     const whitePlayer = game.players.white;
     const blackPlayer = game.players.black;
@@ -535,6 +559,21 @@ class ChessGameServer {
 
     if (!game) {
       if (callback) callback({ error: 'Game not found' });
+      return;
+    }
+
+    // SECURITY: Validate that the socket belongs to the leaving player
+    const leavingPlayer = game.players.white.uid === playerId ? game.players.white : 
+                          game.players.black.uid === playerId ? game.players.black : null;
+    
+    if (!leavingPlayer) {
+      if (callback) callback({ error: 'Player not found' });
+      return;
+    }
+
+    if (leavingPlayer.socketId && socket.id !== leavingPlayer.socketId) {
+      console.warn(`[CHESS] Security Alert: Socket ${socket.id} attempted to leave game for player ${playerId} but expected socket ${leavingPlayer.socketId}`);
+      if (callback) callback({ error: 'Unauthorized leave' });
       return;
     }
 
