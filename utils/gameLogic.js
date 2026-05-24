@@ -31,7 +31,29 @@
  * - After 6 steps in home stretch: token is FINISHED (position 106)
  * - Tokens enter home stretch from circled box (home entry point)
  */
-const {  getUniqueAIPlayers  } = require('./aiPlayer');
+/**
+ * Helper to generate unique AI names and avatars
+ */
+exports.getUniqueAIPlayers = (count) => {
+  const aiNames = [
+    "Computer",
+    "Bot Alpha",
+    "Bot Beta",
+    "Deep Blue",
+    "AlphaGo",
+    "ChessMaster",
+    "LudoKing",
+  ];
+  return Array.from({ length: count }, (_, i) => {
+    const name = aiNames[i % aiNames.length];
+    return {
+      name,
+      // Using helper API for consistent avatars
+      avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=random&color=fff&size=200`,
+    };
+  });
+};
+
 const { 
     PLAYER_POSITIONS,
     SAFE_ZONES,
@@ -92,7 +114,7 @@ exports.isValidTokenPosition = (position) => {
  * If position is invalid, return home base (-1)
  */
 exports.sanitizeTokenPosition = (position, color) => {
-  if (!isValidTokenPosition(position)) {
+  if (!exports.isValidTokenPosition(position)) {
     console.error(
       `[GameLogic] Sanitizing invalid position ${position} for ${color} -> returning to home base`,
     );
@@ -151,9 +173,10 @@ exports.calculateNewPosition = (
   gameMode = 'classic',
   hasKilled = false,
 ) => {
-  const playerConfig = PLAYER_POSITIONS[playerColor];
+  const playerConfig = PLAYER_POSITIONS[playerColor.toUpperCase()];
 
-  if (__DEV__) {
+  const IS_DEV = typeof process !== 'undefined' && process.env && process.env.NODE_ENV !== 'production';
+  if (IS_DEV) {
     console.log(
       `[GameLogic] calculateNewPosition: color=${playerColor}, currentPos=${currentPos}, dice=${diceValue}, steps=${currentSteps}`,
     );
@@ -179,7 +202,7 @@ exports.calculateNewPosition = (
   if (newSteps >= 51) {
     // Quick Arrow Mode check
     if (gameMode === 'quick_arrow' && !hasKilled) {
-      if (__DEV__) {
+      if (IS_DEV) {
         console.log(
           `🔒 [QUICK ARROW] Cannot enter center - no kills yet (${playerColor}). Token loops on main track.`
         );
@@ -194,7 +217,7 @@ exports.calculateNewPosition = (
     
     // Must roll exactly the number needed to finish
     if (homeStep > 5) {
-      if (__DEV__) {
+      if (IS_DEV) {
         console.log(`[GameLogic] Invalid move: Token needs ${5 - (currentSteps >= 51 ? currentSteps - 51 : -1)} max to finish`);
       }
       return { position: currentPos, stepsFromStart: currentSteps };
@@ -235,7 +258,7 @@ exports.isValidMove = (token, diceValue, playerColor, gameMode = 'classic', hasK
     return diceValue === 6;
   }
 
-  const result = calculateNewPosition(
+  const result = exports.calculateNewPosition(
     token.position,
     diceValue,
     playerColor,
@@ -252,7 +275,8 @@ exports.isValidMove = (token, diceValue, playerColor, gameMode = 'classic', hasK
 exports.getValidMoves = (tokens, diceValue, playerColor, gameMode = 'classic', hasKilled = false) => {
   return tokens
     .map((token, index) => ({ token, index }))
-    .filter(({ token }) => isValidMove(token, diceValue, playerColor, gameMode, hasKilled));
+    .filter(({ token }) => exports.isValidMove(token, diceValue, playerColor, gameMode, 
+hasKilled));
 };
 
 /**
@@ -267,7 +291,7 @@ exports.getValidMoves = (tokens, diceValue, playerColor, gameMode = 'classic', h
  */
 exports.checkForKill = (position, allPlayers, currentPlayerColor, isTeamMode = false) => {
   // Safe zones, home stretch, and home base protect tokens
-  if (isSafeZone(position) || position >= 100 || position === -1) return null;
+  if (exports.isSafeZone(position) || position >= 100 || position === -1) return null;
 
   // Get current player's team
   const currentPlayerTeam = allPlayers[currentPlayerColor]?.team;
@@ -336,14 +360,14 @@ exports.moveToken = (token, newPositionData, playerColor) => {
       : token.stepsFromStart || 0;
 
   // Validate new position
-  if (!isValidTokenPosition(newPosition)) {
+  if (!exports.isValidTokenPosition(newPosition)) {
     console.error(
       `[GameLogic] ERROR: Attempting to move token to invalid position ${newPosition}! Keeping at ${token.position}`,
     );
     return token; // Don't move
   }
 
-  const finished = hasTokenFinished(newPosition);
+  const finished = exports.hasTokenFinished(newPosition);
 
   console.log(
     `[GameLogic] Moving token from ${token.position} to ${newPosition}, steps: ${token.stepsFromStart || 0} -> ${newSteps}, finished: ${finished}`,
@@ -453,7 +477,7 @@ exports.hasTeamWon = (players, isTeamMode, gameMode = 'classic') => {
       // Both players in Team A must have achieved quick arrow condition
       const teamABothAchieved = teamAPlayers.every(color => {
         const player = players[color];
-        return hasPlayerAchievedQuickArrow(
+        return exports.hasPlayerAchievedQuickArrow(
           player.tokens,
           player.hasKilled || player.hasQuickArrowWon
         );
@@ -478,7 +502,7 @@ exports.hasTeamWon = (players, isTeamMode, gameMode = 'classic') => {
       // Both players in Team B must have achieved quick arrow condition
       const teamBBothAchieved = teamBPlayers.every(color => {
         const player = players[color];
-        return hasPlayerAchievedQuickArrow(
+        return exports.hasPlayerAchievedQuickArrow(
           player.tokens,
           player.hasKilled || player.hasQuickArrowWon
         );
@@ -505,7 +529,7 @@ exports.hasTeamWon = (players, isTeamMode, gameMode = 'classic') => {
   const teamAPlayers = teamA.filter(color => players[color]);
   if (teamAPlayers.length > 0) {
     const teamAWon = teamAPlayers.every(color => 
-      hasPlayerWon(players[color].tokens, gameMode, players[color].hasKilled)
+      exports.hasPlayerWon(players[color].tokens, gameMode, players[color].hasKilled)
     );
     if (teamAWon) {
       console.log('🏆 [TEAM MODE] Team A wins! (Red + Yellow)');
@@ -539,7 +563,7 @@ exports.initializeTokens = (playerColor, gameMode = 'classic') => {
   
   // In Quick Arrow mode, first token starts at player's starting cell (outside)
   if (isQuickArrow) {
-    const playerConfig = PLAYER_POSITIONS[playerColor];
+    const playerConfig = PLAYER_POSITIONS[playerColor.toUpperCase()];
     const tokens = [
       { id: 0, position: playerConfig.startCell, state: TOKEN_STATE.ACTIVE, stepsFromStart: 0 },
       { id: 1, position: -1, state: TOKEN_STATE.HOME, stepsFromStart: 0 },
@@ -574,7 +598,7 @@ exports.initializeGame = (playerColors, userData = null, options = {}) => {
   const aiCount = userData ? totalCount - 1 : totalCount;
 
   // Get AI profiles
-  const aiPlayers = getUniqueAIPlayers(aiCount);
+  const aiPlayers = exports.getUniqueAIPlayers(aiCount);
 
   // Create a list of identity objects to assign
   let identities = [];
@@ -688,7 +712,7 @@ exports.initializeGame = (playerColors, userData = null, options = {}) => {
 
     players[color] = {
       color,
-      tokens: initializeTokens(color, gameMode), // Pass color and game mode
+      tokens: exports.initializeTokens(color, gameMode), // Pass color and game mode
       finishedCount: 0,
       hasKilled: false, // Track if player has killed any opponent (for Quick Arrow mode)
       hasQuickArrowWon: false, // Track if player achieved quick arrow condition in team mode
