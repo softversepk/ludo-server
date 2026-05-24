@@ -363,7 +363,7 @@ class LudoGameServer {
           console.log(`🤖 [BOT MOVE] ${currentColor} moved token ${tokenIndex} to ${moveResult.newPosition}`);
 
           if (moveResult.won) {
-            this.handleGameOver(room, currentColor);
+            this.handlePlayerWin(room, currentColor);
           } else if (room.gameState.currentPlayer === currentColor) {
              // Bot got a bonus turn, play again
              this.playBotTurn(roomId);
@@ -622,7 +622,7 @@ class LudoGameServer {
 
       // Check for game over
       if (moveResult.won) {
-        this.handleGameOver(room, player.color);
+        this.handlePlayerWin(room, player.color);
       }
     } catch (error) {
       console.error('❌ [MOVE ERROR]', error);
@@ -972,9 +972,19 @@ class LudoGameServer {
    * Move to next player
    */
   nextTurn(room) {
-    const currentIndex = room.gameState.turnOrder.indexOf(room.gameState.currentPlayer);
-    const nextIndex = (currentIndex + 1) % room.gameState.turnOrder.length;
-    room.gameState.currentPlayer = room.gameState.turnOrder[nextIndex];
+    let currentIndex = room.gameState.turnOrder.indexOf(room.gameState.currentPlayer);
+    let nextIndex = (currentIndex + 1) % room.gameState.turnOrder.length;
+    let nextPlayer = room.gameState.turnOrder[nextIndex];
+
+    // Skip players who have already won
+    let loopCount = 0;
+    while (room.gameState.winners && room.gameState.winners.includes(nextPlayer) && loopCount < room.gameState.turnOrder.length) {
+        nextIndex = (nextIndex + 1) % room.gameState.turnOrder.length;
+        nextPlayer = room.gameState.turnOrder[nextIndex];
+        loopCount++;
+    }
+
+    room.gameState.currentPlayer = nextPlayer;
     room.gameState.status = GAME_STATE.ROLLING;
     room.gameState.diceValue = null;
     room.gameState.validMoves = [];
@@ -984,36 +994,96 @@ class LudoGameServer {
   }
 
   /**
+   * Handle a player finishing all tokens
+   */
+  handlePlayerWin(room, playerColor) {
+    const gameMode = room.gameMode || room.mode || 'classic';
+    const totalPlayers = room.gameState.turnOrder.length;
+    
+    if (!room.gameState.winners) {
+      room.gameState.winners = [];
+    }
+    
+    if (!room.gameState.winners.includes(playerColor)) {
+      room.gameState.winners.push(playerColor);
+    }
+    
+    const isQuickArrow = gameMode === 'quick_arrow';
+    
+    // Check if game is completely over
+    // It's over if:
+    // - Quick Arrow mode (1st winner ends the game)
+    // - Only 2 players started the game
+    // - Total winners >= totalPlayers - 1 (e.g. 3 winners in a 4 player game)
+    if (isQuickArrow || totalPlayers <= 2 || room.gameState.winners.length >= totalPlayers - 1) {
+      this.handleGameOver(room, room.gameState.winners);
+    } else {
+      // Game continues for remaining players
+      this.io.to(room.id).emit('ludo:player_won', {
+        color: playerColor,
+        position: room.gameState.winners.length,
+        timestamp: Date.now()
+      });
+      console.log(`🏆 [PLAYER WON] ${playerColor} got position ${room.gameState.winners.length} in room ${room.id}`);
+      
+      // Pass turn to next player
+      this.nextTurn(room);
+    }
+  }
+
+  /**
    * Handle game over
    */
   async handleGameOver(room, winnerColor) {
     room.gameState.status = GAME_STATE.FINISHED;
-    room.gameState.winner = winnerColor;
+    const isArray = Array.isArray(winnerColor);
+    const firstWinner = isArray ? winnerColor[0] : winnerColor;
+    const allWinners = isArray ? winnerColor : [winnerColor];
+
+    room.gameState.winner = firstWinner;
+    room.gameState.winners = allWinners;
 
     this.io.to(room.id).emit('ludo:game_over', {
-      winner: winnerColor,
+      winner: firstWinner,
+      winners: allWinners,
       finalState: this.getGameState(room),
       timestamp: Date.now()
     });
 
-    console.log(`🏆 [GAME OVER] Winner: ${winnerColor} in room ${room.id}`);
+    console.log(`🏆 [GAME OVER] Winners: ${allWinners.join(', ')} in room ${room.id}`);
 
     // Process rewards
     try {
       const betAmount = room.betAmount || 100;
+      const totalPlayers = room.gameState.turnOrder.length;
+
       for (const [color, player] of Object.entries(room.gameState.players)) {
         if (!player || player.isBot || !player.uid) continue;
         
-        if (color === winnerColor || (room.isTeamMode && player.team === room.gameState.players[winnerColor]?.team)) {
-          // It's a win!
-          const result = await RewardServiceServer.awardGameWin(player.uid, 'LUDO', betAmount);
-          if (result.success) {
-            // Notify the specific user about their rewards
-            this.io.to(room.id).emit(`reward:awarded:${player.uid}`, result);
+        let position = allWinners.indexOf(color) + 1; // 1-based index
+        const isWinner = position > 0;
+        
+        if (room.isTeamMode) {
+          const winningTeam = room.gameState.players[firstWinner]?.team;
+          if (player.team === winningTeam) {
+            const result = await RewardServiceServer.awardGameWin(player.uid, 'LUDO', betAmount, 1, 2);
+            if (result.success) {
+              this.io.to(room.id).emit(`reward:awarded:${player.uid}`, result);
+            }
+          } else {
+            await RewardServiceServer.awardGameLoss(player.uid, 'LUDO', betAmount);
           }
         } else {
-          // It's a loss
-          await RewardServiceServer.awardGameLoss(player.uid, 'LUDO', betAmount);
+          // Normal mode (Classic, Arrow, Quick Arrow)
+          if (isWinner) {
+            const result = await RewardServiceServer.awardGameWin(player.uid, 'LUDO', betAmount, position, totalPlayers);
+            if (result.success) {
+              this.io.to(room.id).emit(`reward:awarded:${player.uid}`, result);
+            }
+          } else {
+            // It's a loss
+            await RewardServiceServer.awardGameLoss(player.uid, 'LUDO', betAmount);
+          }
         }
       }
     } catch (error) {
