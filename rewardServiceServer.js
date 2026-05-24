@@ -13,7 +13,7 @@ const CLUB_POINTS_BY_BET = {
 const COIN_MULTIPLIER = 2.0;
 
 class RewardServiceServer {
-  static async awardGameWin(userId, gameType, betAmount = 100) {
+  static async awardGameWin(userId, gameType, betAmount = 100, position = 1, totalPlayers = 2) {
     try {
       if (!userId) return { success: false, error: 'No user ID' };
       
@@ -26,20 +26,37 @@ class RewardServiceServer {
       const userData = userDoc.data();
       const clubId = userData.clubId;
       
-      const coinReward = Math.floor(betAmount * COIN_MULTIPLIER);
+      let coinReward = 0;
+      if (totalPlayers === 4) {
+        if (position === 1) coinReward = betAmount * 3.0; // 1st place gets 3x (e.g. 300)
+        else if (position === 2) coinReward = betAmount * 1.0; // 2nd place gets 1x (e.g. 100)
+        else if (position === 3) coinReward = 0; // 3rd place gets 0
+        else coinReward = 0;
+      } else {
+        coinReward = Math.floor(betAmount * COIN_MULTIPLIER); // Default 2.0
+      }
+      
       const clubPointReward = CLUB_POINTS_BY_BET[betAmount] || Math.max(1, Math.floor(betAmount / 100));
       
       // Award coins
       const batch = db.batch();
       
-      batch.update(userRef, {
-        coins: admin.firestore.FieldValue.increment(coinReward),
-        totalCoinsEarned: admin.firestore.FieldValue.increment(coinReward),
-        weeklyCoins: admin.firestore.FieldValue.increment(coinReward),
-        weeklyProfitCoins: admin.firestore.FieldValue.increment(coinReward),
-        gamesWon: admin.firestore.FieldValue.increment(1),
+      const updateData = {
         gamesPlayed: admin.firestore.FieldValue.increment(1)
-      });
+      };
+
+      if (position === 1) {
+        updateData.gamesWon = admin.firestore.FieldValue.increment(1);
+      }
+
+      if (coinReward > 0) {
+        updateData.coins = admin.firestore.FieldValue.increment(coinReward);
+        updateData.totalCoinsEarned = admin.firestore.FieldValue.increment(coinReward);
+        updateData.weeklyCoins = admin.firestore.FieldValue.increment(coinReward);
+        updateData.weeklyProfitCoins = admin.firestore.FieldValue.increment(coinReward);
+      }
+      
+      batch.update(userRef, updateData);
       
       // Award club points if in a club
       let clubName = null;
