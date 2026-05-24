@@ -376,7 +376,9 @@ class LudoGameServer {
     } catch (error) {
       console.error('❌ [BOT ERROR]', error);
       // Failsafe: skip turn on error so game doesn't hang
-      this.skipTurn(room, currentColor, room.gameState.diceValue || 1);
+      if (room && room.gameState && room.gameState.currentPlayer === currentColor) {
+        this.skipTurn(room, currentColor, room.gameState.diceValue || 1);
+      }
     }
   }
 
