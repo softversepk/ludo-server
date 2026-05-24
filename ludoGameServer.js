@@ -722,7 +722,6 @@ class LudoGameServer {
     let newPosition;
     let newState = token.state;
     let tokenFinished = false;
-    let jumpedOnArrow = false;
 
     // Moving from home
     if (token.position === -1) {
@@ -745,15 +744,6 @@ class LudoGameServer {
         newState = TOKEN_STATE.FINISHED;
         player.finishedCount++;
         tokenFinished = true;
-      } else if (newPosition < 56) {
-        // Arrow Mode M-to-M Shortcut Jumps
-        if (gameMode === 'arrow' || gameMode === 'quick_arrow') {
-          if ([4, 17, 30, 43].includes(newPosition)) {
-            // Jump to next box
-            newPosition += 1;
-            jumpedOnArrow = true;
-          }
-        }
       }
     }
 
@@ -774,7 +764,7 @@ class LudoGameServer {
     const won = player.finishedCount === 4;
 
     // Determine next turn
-    const bonusTurn = diceValue === 6 || killed !== null || tokenFinished || jumpedOnArrow;
+    const bonusTurn = diceValue === 6 || killed !== null || tokenFinished;
 
     if (!bonusTurn && !won) {
       this.nextTurn(room);
@@ -787,8 +777,7 @@ class LudoGameServer {
       newState,
       killed,
       bonusTurn,
-      won,
-      jumpedOnArrow
+      won
     };
   }
 
