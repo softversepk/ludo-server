@@ -1752,6 +1752,64 @@ io.on("connection", (socket) => {
       }
       // --- END LUDO ARROW MODE BACKEND SECURE LOGIC ---
 
+      // --- LUDO TEAMUP SECURE WIN VALIDATION ---
+      if ((room.isTeam || room.isTeamMode) && gameState && gameState.players) {
+        // We ensure a hacker cannot fake a win for their team.
+        const isLudo = !room.mode || room.mode === 'classic' || room.mode === 'quick' || room.mode === 'arrow' || room.mode === 'quick_arrow';
+        if (isLudo) {
+          const teamAColors = ['RED', 'YELLOW'];
+          const teamBColors = ['GREEN', 'BLUE'];
+          
+          let teamAWon = false;
+          let teamBWon = false;
+
+          // Helper function to verify if a player has legitimately won
+          const verifyPlayerWin = (color) => {
+            const player = gameState.players[color];
+            if (!player || !player.tokens) return false;
+            
+            const finishedCount = player.tokens.filter(t => t.state === 'finished' || t.state === 'HOME').length;
+            
+            if (room.gameMode === 'quick_arrow') {
+              // Quick arrow mode requires at least 1 kill AND 1 token finished
+              return player.hasKilled && finishedCount >= 1;
+            } else {
+              // Classic/Arrow mode requires all 4 tokens finished
+              return finishedCount === 4;
+            }
+          };
+
+          const teamAActive = teamAColors.filter(c => gameState.players[c]);
+          const teamBActive = teamBColors.filter(c => gameState.players[c]);
+
+          // Team wins only if all its active players have finished
+          if (teamAActive.length > 0 && teamAActive.every(verifyPlayerWin)) {
+            teamAWon = true;
+          }
+          if (teamBActive.length > 0 && teamBActive.every(verifyPlayerWin)) {
+            teamBWon = true;
+          }
+
+          if (teamAWon) {
+            gameState.winner = "Team A";
+            gameState.status = "game_over";
+          } else if (teamBWon) {
+            gameState.winner = "Team B";
+            gameState.status = "game_over";
+          } else {
+            // Revert any hacked winning state
+            if (gameState.winner && gameState.winner.startsWith("Team")) {
+              console.warn(`[SECURITY] Blocked hacked TeamUp win in room ${roomCode}`);
+              gameState.winner = null;
+              if (gameState.status === "game_over") {
+                gameState.status = room.gameState?.status || "playing";
+              }
+            }
+          }
+        }
+      }
+      // --- END LUDO TEAMUP SECURE WIN VALIDATION ---
+
       room.gameState = gameState;
 
       // Mark room as game_over and schedule cleanup when a winner is set
