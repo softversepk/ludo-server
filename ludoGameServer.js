@@ -1026,8 +1026,8 @@ class LudoGameServer {
               // Also notify the player directly with their reward details so UI can update
               this.io.to(playerInfo.socketId).emit('ludo:reward_received', {
                 position,
-                reward: result.rewardAmount || (betAmount * (position === 1 ? 2 : position === 2 ? 1.5 : 1)),
-                coins: result.coins
+                reward: result.coins !== undefined ? result.coins : 0,
+                coins: result.coins !== undefined ? result.coins : 0
               });
             }
           }
