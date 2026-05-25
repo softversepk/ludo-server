@@ -30,42 +30,6 @@ class LudoGameServer {
   }
 
   /**
-   * Sync room state securely to Firebase for Admin Panel Live Games
-   */
-  syncToFirebase(roomId) {
-    if (!this.admin) return;
-    
-    const room = this.rooms.get(roomId);
-    if (!room) {
-      // Room ended/deleted, remove from admin panel view
-      this.admin.database().ref(`ludo_rooms/${roomId}`).remove().catch(console.error);
-      return;
-    }
-
-    try {
-      // Only expose non-sensitive public info for the admin panel
-      const playersList = Object.values(room.players).map(p => ({
-        id: p.id,
-        name: p.name || 'Player',
-        color: p.color
-      }));
-
-      const roomData = {
-        gameType: room.gameMode ? `Ludo ${room.gameMode}` : 'Ludo',
-        status: room.gameState.status,
-        players: playersList,
-        entryFee: room.betAmount || 0,
-        createdAt: room.createdAt || Date.now(),
-        updatedAt: Date.now()
-      };
-      
-      this.admin.database().ref(`ludo_rooms/${roomId}`).set(roomData).catch(console.error);
-    } catch (error) {
-      console.error("❌ [LUDO ADMIN SYNC] Failed to sync Ludo room to Firebase:", error);
-    }
-  }
-
-  /**
    * Initialize Socket.IO event handlers
    */
   initialize() {
@@ -91,26 +55,6 @@ class LudoGameServer {
       // Disconnection
       socket.on('disconnect', () => this.handleDisconnect(socket));
     });
-
-    // Listen to Firebase admin commands (Secure backend logic to forcefuly end games)
-    if (this.admin) {
-      const ludoRoomsRef = this.admin.database().ref('ludo_rooms');
-      ludoRoomsRef.on('child_removed', (snapshot) => {
-        const roomId = snapshot.key;
-        if (this.rooms.has(roomId)) {
-          console.log(`🛡️ [ADMIN ACTION] Forcefully terminating Ludo game: ${roomId}`);
-          this.broadcastDeltaUpdate(roomId, {
-            type: 'admin_terminated',
-            message: 'Game forcefully ended by admin',
-            status: 'terminated',
-            timestamp: Date.now()
-          });
-          
-          this.io.to(roomId).emit('ludo:game_terminated', { reason: 'Admin Action' });
-          this.rooms.delete(roomId);
-        }
-      });
-    }
   }
 
   /**
@@ -179,8 +123,6 @@ class LudoGameServer {
         roomState: this.getRoomState(room)
       });
 
-      this.syncToFirebase(roomId); // Sync room to admin panel
-
       console.log(`✅ [JOIN] Player ${playerId} joined as ${playerColor}`);
     } catch (error) {
       console.error('❌ [JOIN ERROR]', error);
@@ -235,12 +177,10 @@ class LudoGameServer {
       // If room is empty or only bots left, delete it
       if (!hasRealPlayers) {
         this.rooms.delete(roomId);
-        this.syncToFirebase(roomId); // Sync deletion to admin panel
         console.log(`🗑️ [CLEANUP] Room ${roomId} deleted (only bots left or empty)`);
       } else {
         // Notify remaining players
         this.broadcastRoomUpdate(roomId);
-        this.syncToFirebase(roomId); // Sync player leave to admin panel
       }
     } catch (error) {
       console.error('❌ [LEAVE ERROR]', error);
@@ -298,8 +238,6 @@ class LudoGameServer {
         gameState: this.getGameState(room),
         timestamp: Date.now()
       });
-
-      this.syncToFirebase(roomId); // Sync game start to admin panel
 
       console.log(`✅ [START] Game started. Turn order: ${room.gameState.turnOrder.join(' → ')}`);
 
@@ -1110,8 +1048,6 @@ class LudoGameServer {
     room.gameState.winner = firstWinner;
     room.gameState.winners = allWinners;
 
-    this.syncToFirebase(room.id); // Sync game over status
-
     this.io.to(room.id).emit('ludo:game_over', {
       winner: firstWinner,
       winners: allWinners,
@@ -1163,7 +1099,6 @@ class LudoGameServer {
       setTimeout(() => {
         if (this.rooms.has(room.id)) {
           this.rooms.delete(room.id);
-          this.syncToFirebase(room.id); // Sync room deletion to admin panel
           console.log(`🗑️ [CLEANUP] Room ${room.id} deleted after game over`);
         }
       }, 30000);
