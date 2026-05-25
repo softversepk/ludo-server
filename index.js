@@ -1688,6 +1688,70 @@ io.on("connection", (socket) => {
         room.gameState?.status === "game_over" ||
         gameState?.winner;
 
+      // --- LUDO ARROW MODE BACKEND SECURE LOGIC ---
+      // This enforces the jump on the server side so hackers cannot bypass it
+      const isArrowMode = room.gameMode === 'arrow' || room.gameMode === 'quick_arrow' || room.mode === 'arrow' || room.mode === 'quick_arrow';
+      
+      if (isArrowMode && gameState && gameState.players && room.gameState && room.gameState.players && !alreadyOver) {
+        const tailPositions = [4, 17, 30, 43];
+        const gameLogic = require('./utils/gameLogic');
+        let arrowJumpOccurred = false;
+        let jumpingTokenColor = null;
+        
+        for (const [color, player] of Object.entries(gameState.players)) {
+          const oldPlayer = room.gameState.players[color];
+          if (!oldPlayer || !oldPlayer.tokens || !player.tokens) continue;
+          
+          for (let i = 0; i < player.tokens.length; i++) {
+            const newToken = player.tokens[i];
+            const oldToken = oldPlayer.tokens[i];
+            
+            // If token moved forward and landed on an arrow tail
+            if (newToken && oldToken && newToken.position > oldToken.position && tailPositions.includes(newToken.position)) {
+              console.log(`⚡ [ARROW JUMP SECURE] Token ${i} of ${color} landed on tail ${newToken.position} in room ${roomCode}! Applying secure jump...`);
+              
+              // 1. Move to next box (+1)
+              newToken.position += 1;
+              if (newToken.stepsFromStart !== undefined) {
+                newToken.stepsFromStart += 1;
+              }
+              
+              arrowJumpOccurred = true;
+              jumpingTokenColor = color;
+              
+              // 2. Check for kill at the new position
+              const killResult = gameLogic.checkForKill(newToken.position, gameState.players, color, room.isTeamMode || false);
+              
+              if (killResult) {
+                console.log(`⚔️ [ARROW JUMP KILL] ${color} killed ${killResult.color}'s token ${killResult.tokenIndex} at position ${newToken.position}!`);
+                
+                // Send victim home
+                const victim = gameState.players[killResult.color];
+                if (victim && victim.tokens && victim.tokens[killResult.tokenIndex]) {
+                  victim.tokens[killResult.tokenIndex] = gameLogic.sendTokenHome(victim.tokens[killResult.tokenIndex]);
+                }
+                
+                // Update kills
+                player.hasKilled = true;
+                if (!gameState.kills) gameState.kills = 0;
+                gameState.kills += 1;
+              }
+            }
+          }
+        }
+        
+        // 3. Grant new turn if jump occurred
+        if (arrowJumpOccurred) {
+          // Force current player to stay the same to grant a bonus turn
+          // This overrides any NEXT_TURN the client might have dispatched
+          gameState.currentPlayer = jumpingTokenColor;
+          gameState.status = "rolling";
+          gameState.diceValue = null;
+          gameState.validMoves = [];
+        }
+      }
+      // --- END LUDO ARROW MODE BACKEND SECURE LOGIC ---
+
       room.gameState = gameState;
 
       // Mark room as game_over and schedule cleanup when a winner is set
