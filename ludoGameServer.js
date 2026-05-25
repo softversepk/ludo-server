@@ -1010,14 +1010,11 @@ class LudoGameServer {
       room.gameState.winners.push(playerColor);
     }
     
-    const isQuickArrow = gameMode === 'quick_arrow';
-    
     // Check if game is completely over
     // It's over if:
-    // - Quick Arrow mode (1st winner ends the game)
     // - Only 2 players started the game
     // - Total winners >= totalPlayers - 1 (e.g. 3 winners in a 4 player game)
-    if (isQuickArrow || totalPlayers <= 2 || room.gameState.winners.length >= totalPlayers - 1) {
+    if (totalPlayers <= 2 || room.gameState.winners.length >= totalPlayers - 1) {
       this.handleGameOver(room, room.gameState.winners);
     } else {
       // Game continues for remaining players
