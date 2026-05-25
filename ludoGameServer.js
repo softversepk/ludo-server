@@ -922,8 +922,15 @@ class LudoGameServer {
     token.position = newPosition;
     token.state = newState;
 
-    // Check for win
-    const won = player.finishedCount === 4;
+    // Check for win securely based on game mode
+    let won = false;
+    if (gameMode === 'quick_arrow') {
+      // In Quick Arrow, they just need 1 token finished (hasKilled is enforced before entering home stretch)
+      won = player.finishedCount >= 1;
+    } else {
+      // Classic and Arrow mode require all 4 tokens to finish
+      won = player.finishedCount === 4;
+    }
 
     // Determine next turn
     const bonusTurn = diceValue === 6 || killed !== null || tokenFinished || arrowJumpOccurred;
@@ -1050,11 +1057,33 @@ class LudoGameServer {
       // ----------------------------------------------
     }
     
-    // Check if game is completely over
-    // It's over if:
-    // - Only 2 players started the game
-    // - Total winners >= totalPlayers - 1 (e.g. 3 winners in a 4 player game)
-    if (totalPlayers <= 2 || room.gameState.winners.length >= totalPlayers - 1) {
+    // Check if game is completely over securely in backend
+    let isGameOver = false;
+    
+    if (room.isTeamMode) {
+      // In TeamUp mode, game is over when BOTH players of a team finish
+      const teamA = ['RED', 'YELLOW'];
+      const teamB = ['GREEN', 'BLUE'];
+      
+      // Check if all active players in Team A have won
+      const teamAActive = teamA.filter(c => room.players[c]);
+      const teamAWon = teamAActive.length > 0 && teamAActive.every(c => room.gameState.winners.includes(c));
+      
+      // Check if all active players in Team B have won
+      const teamBActive = teamB.filter(c => room.players[c]);
+      const teamBWon = teamBActive.length > 0 && teamBActive.every(c => room.gameState.winners.includes(c));
+      
+      if (teamAWon || teamBWon) {
+        isGameOver = true;
+      }
+    } else {
+      // Normal mode: It's over if only 1 player is left to finish
+      if (totalPlayers <= 2 || room.gameState.winners.length >= totalPlayers - 1) {
+        isGameOver = true;
+      }
+    }
+
+    if (isGameOver) {
       this.handleGameOver(room, room.gameState.winners);
     } else {
       // Game continues for remaining players
