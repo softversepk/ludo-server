@@ -998,7 +998,7 @@ class LudoGameServer {
   /**
    * Handle a player finishing all tokens
    */
-  handlePlayerWin(room, playerColor) {
+  async handlePlayerWin(room, playerColor) {
     const gameMode = room.gameMode || room.mode || 'classic';
     const totalPlayers = room.maxPlayers || Object.keys(room.players).length || room.gameState.turnOrder.length;
     
@@ -1008,6 +1008,34 @@ class LudoGameServer {
     
     if (!room.gameState.winners.includes(playerColor)) {
       room.gameState.winners.push(playerColor);
+      
+      // --- IMMEDIATE REWARD PROCESSING FOR WINNER ---
+      try {
+        const betAmount = room.betAmount || 100;
+        const position = room.gameState.winners.length;
+        const playerInfo = Object.values(room.players).find(p => p.color === playerColor);
+        
+        if (playerInfo && !playerInfo.isBot && playerInfo.id) {
+          if (room.isTeamMode) {
+            // Team mode rewards can be handled at game over when team result is final
+          } else {
+            // Normal mode (Classic, Arrow, Quick Arrow)
+            const result = await RewardServiceServer.awardGameWin(playerInfo.id, 'LUDO', betAmount, position, totalPlayers);
+            if (result.success) {
+              this.io.to(room.id).emit(`reward:awarded:${playerInfo.id}`, result);
+              // Also notify the player directly with their reward details so UI can update
+              this.io.to(playerInfo.socketId).emit('ludo:reward_received', {
+                position,
+                reward: result.rewardAmount || (betAmount * (position === 1 ? 2 : position === 2 ? 1.5 : 1)),
+                coins: result.coins
+              });
+            }
+          }
+        }
+      } catch (error) {
+        console.error('Error processing immediate reward in Ludo:', error);
+      }
+      // ----------------------------------------------
     }
     
     // Check if game is completely over
@@ -1054,38 +1082,34 @@ class LudoGameServer {
 
     console.log(`🏆 [GAME OVER] Winners: ${allWinners.join(', ')} in room ${room.id}`);
 
-    // Process rewards
+    // Process rewards for losers (and team mode winners)
     try {
       const betAmount = room.betAmount || 100;
       const totalPlayers = room.gameState.turnOrder.length;
 
-      for (const [color, player] of Object.entries(room.gameState.players)) {
-        if (!player || player.isBot || !player.uid) continue;
+      for (const [playerId, player] of Object.entries(room.players)) {
+        if (!player || player.isBot || !player.id) continue;
         
-        let position = allWinners.indexOf(color) + 1; // 1-based index
+        let position = allWinners.indexOf(player.color) + 1; // 1-based index
         const isWinner = position > 0;
         
         if (room.isTeamMode) {
           const winningTeam = room.gameState.players[firstWinner]?.team;
           if (player.team === winningTeam) {
-            const result = await RewardServiceServer.awardGameWin(player.uid, 'LUDO', betAmount, 1, 2);
+            const result = await RewardServiceServer.awardGameWin(player.id, 'LUDO', betAmount, 1, 2);
             if (result.success) {
-              this.io.to(room.id).emit(`reward:awarded:${player.uid}`, result);
+              this.io.to(room.id).emit(`reward:awarded:${player.id}`, result);
             }
           } else {
-            await RewardServiceServer.awardGameLoss(player.uid, 'LUDO', betAmount);
+            await RewardServiceServer.awardGameLoss(player.id, 'LUDO', betAmount);
           }
         } else {
           // Normal mode (Classic, Arrow, Quick Arrow)
-          if (isWinner) {
-            const result = await RewardServiceServer.awardGameWin(player.uid, 'LUDO', betAmount, position, totalPlayers);
-            if (result.success) {
-              this.io.to(room.id).emit(`reward:awarded:${player.uid}`, result);
-            }
-          } else {
-            // It's a loss
-            await RewardServiceServer.awardGameLoss(player.uid, 'LUDO', betAmount);
+          if (!isWinner) {
+            // It's a loss - process deduction
+            await RewardServiceServer.awardGameLoss(player.id, 'LUDO', betAmount);
           }
+          // Winners already received their rewards immediately in handlePlayerWin
         }
       }
     } catch (error) {
