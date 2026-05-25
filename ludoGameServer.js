@@ -897,24 +897,36 @@ class LudoGameServer {
       }
     }
 
-    // Update token
-    token.position = newPosition;
-    token.state = newState;
-
     // Check for kills
     let killed = null;
+    let arrowJumpOccurred = false;
+
+    // --- ARROW MODE JUMP LOGIC ---
     if (newState === TOKEN_STATE.ACTIVE) {
+      const isArrowMode = gameMode === 'arrow' || gameMode === 'quick_arrow';
+      const tailPositions = [4, 17, 30, 43];
+      
+      if (isArrowMode && tailPositions.includes(newPosition)) {
+        console.log(`⚡ [ARROW JUMP SERVER] Token landed on arrow tail ${newPosition}! Jumping to next box...`);
+        newPosition += 1;
+        arrowJumpOccurred = true;
+      }
+      
       killed = this.checkForKill(room, playerColor, newPosition);
       if (killed !== null) {
         player.hasKilled = true;
       }
     }
 
+    // Update token
+    token.position = newPosition;
+    token.state = newState;
+
     // Check for win
     const won = player.finishedCount === 4;
 
     // Determine next turn
-    const bonusTurn = diceValue === 6 || killed !== null || tokenFinished;
+    const bonusTurn = diceValue === 6 || killed !== null || tokenFinished || arrowJumpOccurred;
 
     if (!bonusTurn && !won) {
       this.nextTurn(room);
