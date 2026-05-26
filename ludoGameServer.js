@@ -346,13 +346,10 @@ class LudoGameServer {
         const diceValue = room.gameState.diceValue;
         
         // Use AI logic to pick best move
-        const assistingPlayerColor = this.getAssistingPlayer(room, currentColor);
-        const targetColor = assistingPlayerColor || currentColor;
-
         const tokenIndex = getAIMove(
-          room.gameState.players[targetColor].tokens,
+          room.gameState.players[currentColor].tokens,
           diceValue,
-          targetColor,
+          currentColor,
           room.gameState.players,
           difficulty,
           gameMode
