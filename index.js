@@ -1810,33 +1810,32 @@ io.on("connection", (socket) => {
       }
       // --- END LUDO ARROW MODE BACKEND SECURE LOGIC ---
 
-      // --- LUDO SECURE WIN VALIDATION ---
-      const isLudo = !room.mode || room.mode === 'classic' || room.mode === 'quick' || room.mode === 'arrow' || room.mode === 'quick_arrow';
-      
-      if (isLudo && gameState && gameState.players) {
-        // Helper function to verify if a player has legitimately won
-        const verifyPlayerWin = (color) => {
-          const player = gameState.players[color];
-          if (!player || !player.tokens) return false;
-          
-          const finishedCount = player.tokens.filter(t => t.state === 'finished' || t.state === 'HOME').length;
-          
-          if (room.gameMode === 'quick_arrow' || room.gameMode === 'quick') {
-            // Quick mode requires at least 1 kill AND 1 token finished
-            return player.hasKilled && finishedCount >= 1;
-          } else {
-            // Classic/Arrow mode requires all 4 tokens finished
-            return finishedCount === 4;
-          }
-        };
-
-        if (room.isTeam || room.isTeamMode) {
-          // Teamup mode validation
+      // --- LUDO TEAMUP SECURE WIN VALIDATION ---
+      if ((room.isTeam || room.isTeamMode) && gameState && gameState.players) {
+        // We ensure a hacker cannot fake a win for their team.
+        const isLudo = !room.mode || room.mode === 'classic' || room.mode === 'quick' || room.mode === 'arrow' || room.mode === 'quick_arrow';
+        if (isLudo) {
           const teamAColors = ['RED', 'YELLOW'];
           const teamBColors = ['GREEN', 'BLUE'];
           
           let teamAWon = false;
           let teamBWon = false;
+
+          // Helper function to verify if a player has legitimately won
+          const verifyPlayerWin = (color) => {
+            const player = gameState.players[color];
+            if (!player || !player.tokens) return false;
+            
+            const finishedCount = player.tokens.filter(t => t.state === 'finished' || t.state === 'HOME').length;
+            
+            if (room.gameMode === 'quick_arrow') {
+              // Quick arrow mode requires at least 1 kill AND 1 token finished
+              return player.hasKilled && finishedCount >= 1;
+            } else {
+              // Classic/Arrow mode requires all 4 tokens finished
+              return finishedCount === 4;
+            }
+          };
 
           const teamAActive = teamAColors.filter(c => gameState.players[c]);
           const teamBActive = teamBColors.filter(c => gameState.players[c]);
@@ -1865,21 +1864,9 @@ io.on("connection", (socket) => {
               }
             }
           }
-        } else {
-          // Individual mode validation
-          if (gameState.winner && gameState.winner !== 'draw' && !gameState.winner.startsWith("Team")) {
-            const isValidWin = verifyPlayerWin(gameState.winner);
-            if (!isValidWin) {
-              console.warn(`[SECURITY] Blocked hacked Individual win for ${gameState.winner} in room ${roomCode}`);
-              gameState.winner = null;
-              if (gameState.status === "game_over") {
-                gameState.status = room.gameState?.status || "playing";
-              }
-            }
-          }
         }
       }
-      // --- END LUDO SECURE WIN VALIDATION ---
+      // --- END LUDO TEAMUP SECURE WIN VALIDATION ---
 
       room.gameState = gameState;
 
