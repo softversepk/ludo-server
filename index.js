@@ -1688,6 +1688,64 @@ io.on("connection", (socket) => {
         room.gameState?.status === "game_over" ||
         gameState?.winner;
 
+      // --- LUDO TEAMUP SECURE MOVE VALIDATION ---
+      if ((room.isTeam || room.isTeamMode) && gameState && gameState.players && room.gameState && room.gameState.players) {
+        const isLudo = !room.mode || room.mode === 'classic' || room.mode === 'quick' || room.mode === 'arrow' || room.mode === 'quick_arrow';
+        
+        if (isLudo && senderId) {
+          // Find which player the sender is
+          const senderPlayer = Object.values(room.players).find(p => p.uid === senderId || p.id === senderId);
+          if (senderPlayer) {
+            const senderColor = senderPlayer.color;
+            const teamA = ['RED', 'YELLOW'];
+            const teamB = ['GREEN', 'BLUE'];
+            
+            let teammateColor = null;
+            if (teamA.includes(senderColor)) teammateColor = teamA.find(c => c !== senderColor);
+            else if (teamB.includes(senderColor)) teammateColor = teamB.find(c => c !== senderColor);
+            
+            // Check if any of teammate's tokens moved
+            if (teammateColor && gameState.players[teammateColor] && room.gameState.players[teammateColor]) {
+              const newTokens = gameState.players[teammateColor].tokens;
+              const oldTokens = room.gameState.players[teammateColor].tokens;
+              
+              let teammateTokenMoved = false;
+              if (newTokens && oldTokens) {
+                for (let i = 0; i < 4; i++) {
+                  if (newTokens[i] && oldTokens[i] && newTokens[i].position !== oldTokens[i].position) {
+                    // Only count forward moves or entering board (0), not kills (which go to -1)
+                    if (newTokens[i].position > oldTokens[i].position || (oldTokens[i].position === -1 && newTokens[i].position === 0)) {
+                      teammateTokenMoved = true;
+                      break;
+                    }
+                  }
+                }
+              }
+              
+              if (teammateTokenMoved) {
+                // Sender moved teammate's token! Are they allowed to?
+                // 1. Sender must have won
+                const senderWon = room.gameState.winners && room.gameState.winners.includes(senderColor);
+                
+                if (!senderWon) {
+                  console.warn(`[SECURITY] Blocked hacked teammate assist! ${senderColor} tried to move ${teammateColor}'s token but ${senderColor} hasn't won yet!`);
+                  if (callback) callback({ success: false, error: "Cannot assist teammate until you win" });
+                  return; // Block update
+                }
+                
+                // 2. It must be sender's turn
+                if (room.gameState.currentPlayer !== senderColor) {
+                  console.warn(`[SECURITY] Blocked hacked teammate assist! ${senderColor} tried to move ${teammateColor}'s token but it's not their turn!`);
+                  if (callback) callback({ success: false, error: "Not your turn" });
+                  return; // Block update
+                }
+              }
+            }
+          }
+        }
+      }
+      // --- END LUDO TEAMUP SECURE MOVE VALIDATION ---
+
       // --- LUDO ARROW MODE BACKEND SECURE LOGIC ---
       // This enforces the jump on the server side so hackers cannot bypass it
       const isArrowMode = room.gameMode === 'arrow' || room.gameMode === 'quick_arrow' || room.mode === 'arrow' || room.mode === 'quick_arrow';
