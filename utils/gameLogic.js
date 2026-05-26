@@ -773,7 +773,7 @@ exports.initializeGame = (playerColors, userData = null, options = {}) => {
  * - Team B: Green + Blue
  * - Turn order alternates between teams: Red (A) → Green (B) → Yellow (A) → Blue (B)
  */
-exports.getNextPlayer = (currentPlayer, turnOrder, diceValue, isTeamMode = false) => {
+exports.getNextPlayer = (currentPlayer, turnOrder, diceValue, isTeamMode = false, winners = []) => {
   // Player gets another turn on rolling 6
   console.log('🔄 [GET_NEXT_PLAYER] Called with:', {
     currentPlayer,
@@ -791,8 +791,35 @@ exports.getNextPlayer = (currentPlayer, turnOrder, diceValue, isTeamMode = false
   // Both Regular and Team Mode: use simple clockwise rotation
   // In Team Mode, the turnOrder is already initialized to alternate between teams
   // (e.g. ['RED', 'GREEN', 'YELLOW', 'BLUE'] or ['BLUE', 'RED', 'GREEN', 'YELLOW'])
-  const currentIndex = turnOrder.indexOf(currentPlayer);
-  const nextPlayerResult = turnOrder[(currentIndex + 1) % turnOrder.length];
+  let currentIndex = turnOrder.indexOf(currentPlayer);
+  let nextPlayerResult = turnOrder[(currentIndex + 1) % turnOrder.length];
+  
+  // Skip players who have already won
+  let loopCount = 0;
+  while (winners.includes(nextPlayerResult) && loopCount < turnOrder.length) {
+    // If it's team mode, check if they can assist a teammate
+    let canAssist = false;
+    if (isTeamMode) {
+      const teamA = ['RED', 'YELLOW'];
+      const teamB = ['GREEN', 'BLUE'];
+      let teammateColor = null;
+      if (teamA.includes(nextPlayerResult)) teammateColor = teamA.find(c => c !== nextPlayerResult);
+      else if (teamB.includes(nextPlayerResult)) teammateColor = teamB.find(c => c !== nextPlayerResult);
+      
+      // If teammate exists and hasn't won yet, they can assist!
+      if (teammateColor && !winners.includes(teammateColor)) {
+        canAssist = true;
+      }
+    }
+
+    if (canAssist) {
+      break; // Don't skip, let them play for their teammate
+    }
+
+    currentIndex = (currentIndex + 1) % turnOrder.length;
+    nextPlayerResult = turnOrder[(currentIndex + 1) % turnOrder.length];
+    loopCount++;
+  }
   
   console.log('🔄 [GET_NEXT_PLAYER] Result:', {
     currentIndex,
