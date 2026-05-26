@@ -306,12 +306,12 @@ exports.getAIMove = (
 exports.getAIThinkingDelay = (difficulty) => {
   switch (difficulty) {
     case AI_DIFFICULTY.EASY:
-      return 100 + Math.random() * 200; // Very quick
+      return 400 + Math.random() * 400; // Quick, careless
     case AI_DIFFICULTY.MEDIUM:
-      return 200 + Math.random() * 300; // Quick thinking
+      return 600 + Math.random() * 600; // Moderate thinking
     case AI_DIFFICULTY.HARD:
-      return 300 + Math.random() * 400; // Slightly more thought
+      return 800 + Math.random() * 800; // Careful consideration
     default:
-      return 200;
+      return 600;
   }
 };
