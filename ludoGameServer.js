@@ -68,6 +68,15 @@ class LudoGameServer {
       let room = this.rooms.get(roomId);
       if (!room) {
         room = this.createRoom(roomId);
+        if (playerData) {
+          room.isTeam = playerData.isTeamMode || playerData.isTeam || false;
+          room.isTeamMode = room.isTeam;
+          room.gameMode = playerData.gameMode || 'classic';
+          room.mode = room.gameMode;
+          room.betAmount = playerData.betAmount || 100;
+          room.gameState.isTeamMode = room.isTeam;
+          room.gameState.gameMode = room.gameMode;
+        }
         this.rooms.set(roomId, room);
       }
 
@@ -286,11 +295,14 @@ class LudoGameServer {
         room.gameState.lastDiceValues[currentColor] = diceValue;
 
         // Calculate valid moves
+        const assistingPlayerColor = this.getAssistingPlayer(room, currentColor);
+        const targetColor = assistingPlayerColor || currentColor;
+
         const validMoves = this.calculateValidMoves(
           room,
-          room.gameState.players[currentColor].tokens,
+          room.gameState.players[targetColor].tokens,
           diceValue,
-          currentColor
+          targetColor
         );
 
         if (validMoves.length > 0) {
@@ -363,7 +375,7 @@ class LudoGameServer {
           console.log(`🤖 [BOT MOVE] ${currentColor} moved token ${tokenIndex} to ${moveResult.newPosition}`);
 
           if (moveResult.won) {
-            this.handlePlayerWin(room, currentColor);
+            this.handlePlayerWin(room, moveResult.targetColor || currentColor);
           } else if (room.gameState.currentPlayer === currentColor) {
              // Bot got a bonus turn, play again
              this.playBotTurn(roomId);
@@ -427,11 +439,14 @@ class LudoGameServer {
       room.gameState.lastDiceValues[player.color] = diceValue;
 
       // Calculate valid moves passing room context for quick arrow mode
+      const assistingPlayerColor = this.getAssistingPlayer(room, player.color);
+      const targetColor = assistingPlayerColor || player.color;
+
       const validMoves = this.calculateValidMoves(
         room,
-        room.gameState.players[player.color].tokens,
+        room.gameState.players[targetColor].tokens,
         diceValue,
-        player.color
+        targetColor
       );
 
       if (validMoves.length > 0) {
@@ -525,11 +540,14 @@ class LudoGameServer {
       room.gameState.lastDiceValues[player.color] = diceValue;
 
       // Calculate valid moves passing room context for quick arrow mode
+      const assistingPlayerColor = this.getAssistingPlayer(room, player.color);
+      const targetColor = assistingPlayerColor || player.color;
+
       const validMoves = this.calculateValidMoves(
         room,
-        room.gameState.players[player.color].tokens,
+        room.gameState.players[targetColor].tokens,
         diceValue,
-        player.color
+        targetColor
       );
 
       if (validMoves.length > 0) {
@@ -624,7 +642,7 @@ class LudoGameServer {
 
       // Check for game over
       if (moveResult.won) {
-        this.handlePlayerWin(room, player.color);
+        this.handlePlayerWin(room, moveResult.targetColor || player.color);
       }
     } catch (error) {
       console.error('❌ [MOVE ERROR]', error);
@@ -761,7 +779,45 @@ class LudoGameServer {
   }
 
   /**
+   * Determine if the given player is assisting a teammate
+   * Returns the color of the teammate if assisting, otherwise null
+   */
+  getAssistingPlayer(room, playerColor) {
+    const isTeamMode = room.isTeamMode || room.isTeam || room.gameState.isTeamMode;
+    if (!isTeamMode) return null;
+
+    // Has this player won?
+    const hasWon = room.gameState.winners && room.gameState.winners.includes(playerColor);
+    if (!hasWon) return null;
+
+    // Find teammate color based on teams
+    const teamA = ['RED', 'YELLOW'];
+    const teamB = ['BLUE', 'GREEN'];
+    
+    let teammateColor = null;
+    if (teamA.includes(playerColor)) {
+      teammateColor = teamA.find(c => c !== playerColor);
+    } else if (teamB.includes(playerColor)) {
+      teammateColor = teamB.find(c => c !== playerColor);
+    }
+
+    if (!teammateColor) return null;
+    
+    // Check if teammate is actually in the game
+    if (!room.players || !Object.values(room.players).some(p => p.color === teammateColor && !p.hasLeft)) {
+      return null;
+    }
+
+    // Has teammate won?
+    const teammateWon = room.gameState.winners && room.gameState.winners.includes(teammateColor);
+    if (teammateWon) return null;
+
+    return teammateColor;
+  }
+
+  /**
    * Assign player color based on available colors
+
    * For TeamUp mode: Prioritize keeping real players in same team
    */
   assignPlayerColor(room) {
@@ -864,7 +920,10 @@ class LudoGameServer {
    * Execute token move (server-side calculation)
    */
   executeMove(room, playerColor, tokenIndex) {
-    const player = room.gameState.players[playerColor];
+    const assistingPlayerColor = this.getAssistingPlayer(room, playerColor);
+    const targetColor = assistingPlayerColor || playerColor;
+
+    const player = room.gameState.players[targetColor];
     const token = player.tokens[tokenIndex];
     const diceValue = room.gameState.diceValue;
     const gameMode = room.gameMode || 'classic';
@@ -912,7 +971,7 @@ class LudoGameServer {
         arrowJumpOccurred = true;
       }
       
-      killed = this.checkForKill(room, playerColor, newPosition);
+      killed = this.checkForKill(room, targetColor, newPosition);
       if (killed !== null) {
         player.hasKilled = true;
       }
@@ -946,7 +1005,8 @@ class LudoGameServer {
       newState,
       killed,
       bonusTurn,
-      won
+      won,
+      targetColor
     };
   }
 
@@ -997,9 +1057,14 @@ class LudoGameServer {
     let nextIndex = (currentIndex + 1) % room.gameState.turnOrder.length;
     let nextPlayer = room.gameState.turnOrder[nextIndex];
 
-    // Skip players who have already won
+    // Skip players who have already won (unless they can assist a teammate in TeamUp mode)
     let loopCount = 0;
     while (room.gameState.winners && room.gameState.winners.includes(nextPlayer) && loopCount < room.gameState.turnOrder.length) {
+        // If this player can assist a teammate, don't skip them
+        if (this.getAssistingPlayer(room, nextPlayer)) {
+            break;
+        }
+        
         nextIndex = (nextIndex + 1) % room.gameState.turnOrder.length;
         nextPlayer = room.gameState.turnOrder[nextIndex];
         loopCount++;
@@ -1097,8 +1162,27 @@ class LudoGameServer {
       // Update room state to client so profile ranks update immediately
       this.broadcastRoomUpdate(room.id);
       
-      // Pass turn to next player
-      this.nextTurn(room);
+      // Pass turn to next player unless they can assist a teammate
+      const assistingPlayer = this.getAssistingPlayer(room, playerColor);
+      if (assistingPlayer) {
+          console.log(`🤝 [TEAM ASSIST] ${playerColor} will now assist ${assistingPlayer}`);
+          room.gameState.status = GAME_STATE.ROLLING;
+          room.gameState.diceValue = null;
+          room.gameState.validMoves = [];
+          
+          // Need to broadcast that it's their turn to roll again
+          this.broadcastDeltaUpdate(room.id, {
+              type: 'turn_skip', // using turn_skip or similar to trigger state update
+              playerColor: playerColor,
+              currentPlayer: playerColor,
+              status: GAME_STATE.ROLLING,
+              timestamp: Date.now()
+          });
+          
+          this.playBotTurn(room.id);
+      } else {
+          this.nextTurn(room);
+      }
     }
   }
 
