@@ -107,6 +107,13 @@ class AirHockeyServer {
     // Secure validation: Reject invalid types
     if (typeof x !== 'number' || typeof y !== 'number' || isNaN(x) || isNaN(y)) return;
 
+    // Security check: Rate Limiting to prevent DoS attacks / packet flooding
+    const now = Date.now();
+    if (!room.lastMoveTimes) room.lastMoveTimes = {};
+    const lastTime = room.lastMoveTimes[socket.id] || 0;
+    if (now - lastTime < 10) return; // Max 100 updates per second per client
+    room.lastMoveTimes[socket.id] = now;
+
     // Secure validation: Clamp coordinates to prevent hacking
     const PADDLE_RAD_X = PADDLE_RADIUS / TABLE_WIDTH;
     const PADDLE_RAD_Y = PADDLE_RADIUS / TABLE_HEIGHT;
@@ -158,7 +165,7 @@ class AirHockeyServer {
   startPhysicsLoop(roomId) {
     const PHYSICS_FPS = 60;
     const INTERVAL_MS = 1000 / PHYSICS_FPS;
-    const BROADCAST_INTERVAL = 33; // ~30 FPS broadcast
+    const BROADCAST_INTERVAL = 16; // ~60 FPS broadcast for ultra-smooth and immediate updates
     let lastBroadcast = Date.now();
     let lastTick = Date.now();
     let lastCountdownTick = Date.now();
