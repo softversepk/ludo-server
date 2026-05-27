@@ -330,6 +330,17 @@ class AirHockeyServer {
         y = p1Result.y;
         vx = p1Result.vx;
         vy = p1Result.vy;
+        
+        // Push puck slightly out to absolutely prevent getting stuck inside paddle
+        const dx = x - p1SubPos.x;
+        const dy = y - p1SubPos.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const minDist = (PUCK_RADIUS + PADDLE_RADIUS) / TABLE_WIDTH; // Simplified normalization
+        if (dist < minDist && dist > 0) {
+           x = p1SubPos.x + (dx / dist) * minDist * 1.01;
+           y = p1SubPos.y + (dy / dist) * minDist * 1.01;
+        }
+
         this.io.to(roomId).emit('air_hockey_hit_paddle', { player: 'player1' });
       }
 
@@ -344,6 +355,17 @@ class AirHockeyServer {
         y = p2Result.y;
         vx = p2Result.vx;
         vy = p2Result.vy;
+
+        // Push puck slightly out to absolutely prevent getting stuck inside paddle
+        const dx = x - p2SubPos.x;
+        const dy = y - p2SubPos.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const minDist = (PUCK_RADIUS + PADDLE_RADIUS) / TABLE_WIDTH; // Simplified normalization
+        if (dist < minDist && dist > 0) {
+           x = p2SubPos.x + (dx / dist) * minDist * 1.01;
+           y = p2SubPos.y + (dy / dist) * minDist * 1.01;
+        }
+
         this.io.to(roomId).emit('air_hockey_hit_paddle', { player: 'player2' });
       }
 
@@ -373,14 +395,16 @@ class AirHockeyServer {
     const dx = (puck.x - paddle.x) * TABLE_WIDTH;
     const dy = (puck.y - paddle.y) * TABLE_HEIGHT;
     const dist = Math.sqrt(dx * dx + dy * dy);
-    const minDist = PUCK_RADIUS + PADDLE_RADIUS;
+    // Add an extra buffer (e.g. + 5) to the minimum distance so the collision box is slightly larger than the visual representation
+    const minDist = PUCK_RADIUS + PADDLE_RADIUS + 5; 
 
     if (dist < minDist) {
       const nx = dx / dist;
       const ny = dy / dist;
 
-      const newX = paddle.x + (nx * (PUCK_RADIUS + PADDLE_RADIUS + 1)) / TABLE_WIDTH;
-      const newY = paddle.y + (ny * (PUCK_RADIUS + PADDLE_RADIUS + 1)) / TABLE_HEIGHT;
+      // Force puck completely out of paddle radius
+      const newX = paddle.x + (nx * (minDist + 1)) / TABLE_WIDTH;
+      const newY = paddle.y + (ny * (minDist + 1)) / TABLE_HEIGHT;
 
       const dot = puck.vx * nx + puck.vy * ny;
 
