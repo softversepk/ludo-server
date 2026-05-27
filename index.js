@@ -1194,6 +1194,13 @@ gameChatServer.initialize();
 
 console.log("✅ Game Chat Server initialized with secure Socket.IO");
 
+// Initialize Air Hockey Server
+const AirHockeyServer = require("./airHockeyServer");
+const airHockeyServer = new AirHockeyServer(io, admin);
+airHockeyServer.initialize();
+
+console.log("✅ Air Hockey Server initialized with authoritative physics");
+
 // Initialize Ludo Game Server
 const ludoGameServer = new LudoGameServer(io, admin);
 ludoGameServer.initialize();
