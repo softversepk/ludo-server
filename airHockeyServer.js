@@ -217,14 +217,71 @@ class AirHockeyServer {
       y: (currP2.y - phys.lastP2Pos.y) / SUB_STEPS,
     };
 
-    phys.lastP1Pos = { ...currP1 };
-    phys.lastP2Pos = { ...currP2 };
+    // Bot Logic (Run once per frame before sub-steps)
+    if (room.isBotMatch) {
+      const REACTION_DELAY_MS = 150;
+      const LERP_SPEED = 0.15;
+      
+      phys.puckHistory.push({ x: state.puck.x, y: state.puck.y, time: Date.now() });
+      if (phys.puckHistory.length > 20) phys.puckHistory.shift();
+
+      const delayedPuck = phys.puckHistory.find(
+        (p) => p.time >= Date.now() - REACTION_DELAY_MS,
+      ) || { x: state.puck.x, y: state.puck.y };
+
+      let targetX = 0.5;
+      let targetY = 0.15;
+
+      const isPuckStationaryInReach = Math.abs(state.puck.vx) < 0.001 && Math.abs(state.puck.vy) < 0.001 && state.puck.y <= 0.55;
+      if (isPuckStationaryInReach) {
+        if (phys.puckStationaryStartRef === 0) {
+          phys.puckStationaryStartRef = Date.now();
+        }
+      } else {
+        phys.puckStationaryStartRef = 0;
+      }
+
+      const shouldBotStartHit = isPuckStationaryInReach && phys.puckStationaryStartRef > 0 && (Date.now() - phys.puckStationaryStartRef > 1000);
+
+      if (state.puck.y < 0.50 || shouldBotStartHit) {
+        targetX = delayedPuck.x;
+        targetY = delayedPuck.y;
+      }
+
+      const currentAiX = state.strikers.player2.x;
+      const currentAiY = state.strikers.player2.y;
+
+      let nextAiX = currentAiX + (targetX - currentAiX) * LERP_SPEED;
+      let nextAiY = currentAiY + (targetY - currentAiY) * LERP_SPEED;
+
+      nextAiY = Math.max(
+        PADDLE_RADIUS / TABLE_HEIGHT,
+        Math.min(0.48, nextAiY),
+      );
+
+      state.strikers.player2 = { x: nextAiX, y: nextAiY };
+      
+      // Update bot velocity for this frame based on the new target
+      phys.p2Vel = {
+        x: (state.strikers.player2.x - phys.lastP2Pos.x) / SUB_STEPS,
+        y: (state.strikers.player2.y - phys.lastP2Pos.y) / SUB_STEPS,
+      };
+    }
+
+    // Interpolate positions across sub-steps to prevent tunneling
+    let p1SubPos = { x: phys.lastP1Pos.x, y: phys.lastP1Pos.y };
+    let p2SubPos = { x: phys.lastP2Pos.x, y: phys.lastP2Pos.y };
 
     for (let step = 0; step < SUB_STEPS; step++) {
       let { x, y, vx, vy } = state.puck;
 
       x += vx / SUB_STEPS;
       y += vy / SUB_STEPS;
+
+      p1SubPos.x += phys.p1Vel.x;
+      p1SubPos.y += phys.p1Vel.y;
+      p2SubPos.x += phys.p2Vel.x;
+      p2SubPos.y += phys.p2Vel.y;
 
       // Wall Collisions
       const minX = PUCK_RADIUS / TABLE_WIDTH;
@@ -254,55 +311,9 @@ class AirHockeyServer {
         }
       }
 
-      // Bot Logic
-      if (room.isBotMatch && step === 0) {
-        const REACTION_DELAY_MS = 150;
-        const LERP_SPEED = 0.15;
-        
-        phys.puckHistory.push({ x, y, time: Date.now() });
-        if (phys.puckHistory.length > 20) phys.puckHistory.shift();
-
-        const delayedPuck = phys.puckHistory.find(
-          (p) => p.time >= Date.now() - REACTION_DELAY_MS,
-        ) || { x, y };
-
-        let targetX = 0.5;
-        let targetY = 0.15;
-
-        const isPuckStationaryInReach = Math.abs(vx) < 0.001 && Math.abs(vy) < 0.001 && y <= 0.55;
-        if (isPuckStationaryInReach) {
-          if (phys.puckStationaryStartRef === 0) {
-            phys.puckStationaryStartRef = Date.now();
-          }
-        } else {
-          phys.puckStationaryStartRef = 0;
-        }
-
-        const shouldBotStartHit = isPuckStationaryInReach && phys.puckStationaryStartRef > 0 && (Date.now() - phys.puckStationaryStartRef > 1000);
-
-        if (y < 0.50 || shouldBotStartHit) {
-          targetX = delayedPuck.x;
-          targetY = delayedPuck.y;
-        }
-
-        const currentAiX = state.strikers.player2.x;
-        const currentAiY = state.strikers.player2.y;
-
-        let nextAiX = currentAiX + (targetX - currentAiX) * LERP_SPEED;
-        let nextAiY = currentAiY + (targetY - currentAiY) * LERP_SPEED;
-
-        nextAiY = Math.max(
-          PADDLE_RADIUS / TABLE_HEIGHT,
-          Math.min(0.48, nextAiY),
-        );
-
-        state.strikers.player2 = { x: nextAiX, y: nextAiY };
-        // The bot's paddle movement will be naturally synced to the client via state_update every 33ms
-      }
-
-      // Paddle Collisions
+      // Paddle Collisions (using interpolated sub-step positions to prevent tunneling)
       const p1Result = this.checkPaddleCollision(
-        state.strikers.player1,
+        p1SubPos,
         { x, y, vx, vy },
         phys.p1Vel,
         1.2
@@ -316,7 +327,7 @@ class AirHockeyServer {
       }
 
       const p2Result = this.checkPaddleCollision(
-        state.strikers.player2,
+        p2SubPos,
         { x, y, vx, vy },
         phys.p2Vel,
         1.2
@@ -346,6 +357,9 @@ class AirHockeyServer {
 
       state.puck = { x, y, vx, vy };
     }
+
+    phys.lastP1Pos = { ...state.strikers.player1 };
+    phys.lastP2Pos = { ...state.strikers.player2 };
   }
 
   checkPaddleCollision(paddle, puck, paddleVel = { x: 0, y: 0 }, customHitPower = 1.2) {
