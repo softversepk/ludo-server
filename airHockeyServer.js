@@ -77,6 +77,11 @@ class AirHockeyServer {
     if (role === 'player1') {
       room.players.player1 = userId;
       room.sockets.player1 = socket.id;
+      if (isBot) {
+        room.isBotMatch = true;
+        room.botData = botData;
+        room.players.player2 = 'bot'; // Mock player2 for bot
+      }
     } else if (role === 'player2') {
       room.players.player2 = userId;
       room.sockets.player2 = socket.id;
@@ -97,16 +102,27 @@ class AirHockeyServer {
   handlePaddleMove(socket, data) {
     const { roomId, role, x, y } = data;
     const room = this.rooms.get(roomId);
-    if (!room) return;
+    if (!room || room.state.status !== 'playing') return;
+
+    // Secure validation: Clamp coordinates to prevent hacking
+    const PADDLE_RAD_X = PADDLE_RADIUS / TABLE_WIDTH;
+    const PADDLE_RAD_Y = PADDLE_RADIUS / TABLE_HEIGHT;
+
+    let clampedX = Math.max(PADDLE_RAD_X, Math.min(1 - PADDLE_RAD_X, x));
+    let clampedY = y;
 
     if (role === 'player1') {
-      room.state.strikers.player1 = { x, y };
+      // Player 1 can only move in the bottom half (y: 0.5 to 1.0)
+      clampedY = Math.max(0.5 + PADDLE_RAD_Y, Math.min(1 - PADDLE_RAD_Y, y));
+      room.state.strikers.player1 = { x: clampedX, y: clampedY };
     } else if (role === 'player2' && !room.isBotMatch) {
-      room.state.strikers.player2 = { x, y };
+      // Player 2 can only move in the top half (y: 0.0 to 0.5)
+      clampedY = Math.max(PADDLE_RAD_Y, Math.min(0.5 - PADDLE_RAD_Y, y));
+      room.state.strikers.player2 = { x: clampedX, y: clampedY };
     }
     
     // Broadcast opponent move instantly for smooth paddle rendering on client
-    socket.to(roomId).emit('opponent_paddle_move', { playerKey: role, x, y });
+    socket.to(roomId).emit('opponent_paddle_move', { playerKey: role, x: clampedX, y: clampedY });
   }
 
   handleLeaveRoom(socket, data) {
@@ -131,6 +147,7 @@ class AirHockeyServer {
     const BROADCAST_INTERVAL = 33; // ~30 FPS broadcast
     let lastBroadcast = Date.now();
     let lastTick = Date.now();
+    let lastCountdownTick = Date.now();
 
     const loop = setInterval(() => {
       const room = this.rooms.get(roomId);
@@ -145,9 +162,9 @@ class AirHockeyServer {
       lastTick = now;
 
       // Handle 1-second countdown
-      if (now % 1000 < INTERVAL_MS) {
-         // rough second tick
+      if (now - lastCountdownTick >= 1000) {
          room.state.timeLeft -= 1;
+         lastCountdownTick += 1000;
          if (room.state.timeLeft <= 0) {
             this.endGameByTime(roomId);
             return;
