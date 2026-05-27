@@ -325,23 +325,15 @@ class AirHockeyServer {
         phys.p1Vel,
         1.2
       );
-      if (p1Result.hit) {
+      if (p1Result.hit || (p1Result.x !== x || p1Result.y !== y)) {
         x = p1Result.x;
         y = p1Result.y;
         vx = p1Result.vx;
         vy = p1Result.vy;
         
-        // Push puck slightly out to absolutely prevent getting stuck inside paddle
-        const dx = x - p1SubPos.x;
-        const dy = y - p1SubPos.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        const minDist = (PUCK_RADIUS + PADDLE_RADIUS) / TABLE_WIDTH; // Simplified normalization
-        if (dist < minDist && dist > 0) {
-           x = p1SubPos.x + (dx / dist) * minDist * 1.01;
-           y = p1SubPos.y + (dy / dist) * minDist * 1.01;
+        if (p1Result.hit) {
+          this.io.to(roomId).emit('air_hockey_hit_paddle', { player: 'player1' });
         }
-
-        this.io.to(roomId).emit('air_hockey_hit_paddle', { player: 'player1' });
       }
 
       const p2Result = this.checkPaddleCollision(
@@ -350,23 +342,15 @@ class AirHockeyServer {
         phys.p2Vel,
         1.2
       );
-      if (p2Result.hit) {
+      if (p2Result.hit || (p2Result.x !== x || p2Result.y !== y)) {
         x = p2Result.x;
         y = p2Result.y;
         vx = p2Result.vx;
         vy = p2Result.vy;
 
-        // Push puck slightly out to absolutely prevent getting stuck inside paddle
-        const dx = x - p2SubPos.x;
-        const dy = y - p2SubPos.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        const minDist = (PUCK_RADIUS + PADDLE_RADIUS) / TABLE_WIDTH; // Simplified normalization
-        if (dist < minDist && dist > 0) {
-           x = p2SubPos.x + (dx / dist) * minDist * 1.01;
-           y = p2SubPos.y + (dy / dist) * minDist * 1.01;
+        if (p2Result.hit) {
+          this.io.to(roomId).emit('air_hockey_hit_paddle', { player: 'player2' });
         }
-
-        this.io.to(roomId).emit('air_hockey_hit_paddle', { player: 'player2' });
       }
 
       // Friction
@@ -395,20 +379,28 @@ class AirHockeyServer {
     const dx = (puck.x - paddle.x) * TABLE_WIDTH;
     const dy = (puck.y - paddle.y) * TABLE_HEIGHT;
     const dist = Math.sqrt(dx * dx + dy * dy);
-    // Add an extra buffer (e.g. + 5) to the minimum distance so the collision box is slightly larger than the visual representation
+    // Add an extra buffer to the minimum distance so the collision box is completely solid
     const minDist = PUCK_RADIUS + PADDLE_RADIUS + 5; 
 
     if (dist < minDist) {
       const nx = dx / dist;
       const ny = dy / dist;
 
-      // Force puck completely out of paddle radius
-      const newX = paddle.x + (nx * (minDist + 1)) / TABLE_WIDTH;
-      const newY = paddle.y + (ny * (minDist + 1)) / TABLE_HEIGHT;
+      // Force puck completely out of paddle radius (using 1.05 multiplier to absolutely guarantee separation)
+      const separationDist = minDist * 1.05;
+      const newX = paddle.x + (nx * separationDist) / TABLE_WIDTH;
+      const newY = paddle.y + (ny * separationDist) / TABLE_HEIGHT;
 
-      const dot = puck.vx * nx + puck.vy * ny;
+      // Calculate relative velocity (puck velocity - paddle velocity)
+      const relVx = puck.vx - paddleVel.x;
+      const relVy = puck.vy - paddleVel.y;
+      const dot = relVx * nx + relVy * ny;
 
-      if (dot > 0) return { ...puck, x: newX, y: newY, hit: false }; // Fix ghost hit by not registering a hit if moving away
+      if (dot > 0) {
+        // If moving away relatively, STILL push it out to prevent sticking, but don't add hit power
+        // This is the CRITICAL fix for the ball passing through: always apply the newX/newY position resolution
+        return { ...puck, x: newX, y: newY, hit: false }; 
+      }
 
       let newVx = puck.vx - 2 * dot * nx;
       let newVy = puck.vy - 2 * dot * ny;
