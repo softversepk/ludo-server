@@ -216,18 +216,18 @@ class AirHockeyServer {
     const currP2 = state.strikers.player2;
 
     phys.p1Vel = {
-      x: (currP1.x - phys.lastP1Pos.x) / SUB_STEPS,
-      y: (currP1.y - phys.lastP1Pos.y) / SUB_STEPS,
+      x: (currP1.x - phys.lastP1Pos.x),
+      y: (currP1.y - phys.lastP1Pos.y),
     };
     phys.p2Vel = {
-      x: (currP2.x - phys.lastP2Pos.x) / SUB_STEPS,
-      y: (currP2.y - phys.lastP2Pos.y) / SUB_STEPS,
+      x: (currP2.x - phys.lastP2Pos.x),
+      y: (currP2.y - phys.lastP2Pos.y),
     };
 
     // Bot Logic (Run once per frame before sub-steps)
     if (room.isBotMatch) {
       const REACTION_DELAY_MS = 150;
-      const LERP_SPEED = 0.15;
+      const LERP_SPEED = 0.25; // Increased bot speed so it can actually hit the ball
       
       phys.puckHistory.push({ x: state.puck.x, y: state.puck.y, time: Date.now() });
       if (phys.puckHistory.length > 20) phys.puckHistory.shift();
@@ -250,7 +250,7 @@ class AirHockeyServer {
 
       const shouldBotStartHit = isPuckStationaryInReach && phys.puckStationaryStartRef > 0 && (Date.now() - phys.puckStationaryStartRef > 1000);
 
-      if (state.puck.y < 0.50 || shouldBotStartHit) {
+      if (state.puck.y < 0.60 || shouldBotStartHit) { // Bot reacts slightly sooner
         targetX = delayedPuck.x;
         targetY = delayedPuck.y;
       }
@@ -270,8 +270,8 @@ class AirHockeyServer {
       
       // Update bot velocity for this frame based on the new target
       phys.p2Vel = {
-        x: (state.strikers.player2.x - phys.lastP2Pos.x) / SUB_STEPS,
-        y: (state.strikers.player2.y - phys.lastP2Pos.y) / SUB_STEPS,
+        x: (state.strikers.player2.x - phys.lastP2Pos.x),
+        y: (state.strikers.player2.y - phys.lastP2Pos.y),
       };
     }
 
@@ -285,10 +285,10 @@ class AirHockeyServer {
       x += vx / SUB_STEPS;
       y += vy / SUB_STEPS;
 
-      p1SubPos.x += phys.p1Vel.x;
-      p1SubPos.y += phys.p1Vel.y;
-      p2SubPos.x += phys.p2Vel.x;
-      p2SubPos.y += phys.p2Vel.y;
+      p1SubPos.x += phys.p1Vel.x / SUB_STEPS;
+      p1SubPos.y += phys.p1Vel.y / SUB_STEPS;
+      p2SubPos.x += phys.p2Vel.x / SUB_STEPS;
+      p2SubPos.y += phys.p2Vel.y / SUB_STEPS;
 
       // Wall Collisions
       const minX = PUCK_RADIUS / TABLE_WIDTH;
@@ -402,13 +402,15 @@ class AirHockeyServer {
         return { ...puck, x: newX, y: newY, hit: false }; 
       }
 
-      let newVx = puck.vx - 2 * dot * nx;
-      let newVy = puck.vy - 2 * dot * ny;
+      // Reflect velocity based on normal
+      let newVx = puck.vx - 2 * (puck.vx * nx + puck.vy * ny) * nx;
+      let newVy = puck.vy - 2 * (puck.vx * nx + puck.vy * ny) * ny;
 
       const BASE_BOUNCE = 0.005;
       newVx += nx * BASE_BOUNCE;
       newVy += ny * BASE_BOUNCE;
 
+      // Transfer momentum from paddle (now paddleVel is correctly per-frame)
       const transferPower = 0.8 * customHitPower;
       newVx += paddleVel.x * transferPower;
       newVy += paddleVel.y * transferPower;
