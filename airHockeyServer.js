@@ -104,6 +104,9 @@ class AirHockeyServer {
     const room = this.rooms.get(roomId);
     if (!room || room.state.status !== 'playing') return;
 
+    // Secure validation: Reject invalid types
+    if (typeof x !== 'number' || typeof y !== 'number' || isNaN(x) || isNaN(y)) return;
+
     // Secure validation: Clamp coordinates to prevent hacking
     const PADDLE_RAD_X = PADDLE_RADIUS / TABLE_WIDTH;
     const PADDLE_RAD_Y = PADDLE_RADIUS / TABLE_HEIGHT;
@@ -111,14 +114,17 @@ class AirHockeyServer {
     let clampedX = Math.max(PADDLE_RAD_X, Math.min(1 - PADDLE_RAD_X, x));
     let clampedY = y;
 
-    if (role === 'player1') {
+    // Additionally check if socket matches the role
+    if (role === 'player1' && room.sockets.player1 === socket.id) {
       // Player 1 can only move in the bottom half (y: 0.5 to 1.0)
       clampedY = Math.max(0.5 + PADDLE_RAD_Y, Math.min(1 - PADDLE_RAD_Y, y));
       room.state.strikers.player1 = { x: clampedX, y: clampedY };
-    } else if (role === 'player2' && !room.isBotMatch) {
+    } else if (role === 'player2' && !room.isBotMatch && room.sockets.player2 === socket.id) {
       // Player 2 can only move in the top half (y: 0.0 to 0.5)
       clampedY = Math.max(PADDLE_RAD_Y, Math.min(0.5 - PADDLE_RAD_Y, y));
       room.state.strikers.player2 = { x: clampedX, y: clampedY };
+    } else {
+      return; // Ignore unauthorized moves
     }
     
     // Broadcast opponent move instantly for smooth paddle rendering on client
@@ -127,7 +133,15 @@ class AirHockeyServer {
 
   handleLeaveRoom(socket, data) {
     const { roomId, userId } = data;
-    this.endGame(roomId, userId, 'forfeit');
+    const room = this.rooms.get(roomId);
+    if (!room) return;
+
+    // Security check: Only allow the correct socket to forfeit
+    if (room.sockets.player1 === socket.id && room.players.player1 === userId) {
+      this.endGame(roomId, userId, 'forfeit');
+    } else if (room.sockets.player2 === socket.id && room.players.player2 === userId) {
+      this.endGame(roomId, userId, 'forfeit');
+    }
   }
 
   handleDisconnect(socket) {
@@ -283,7 +297,7 @@ class AirHockeyServer {
         );
 
         state.strikers.player2 = { x: nextAiX, y: nextAiY };
-        this.io.to(roomId).emit('opponent_paddle_move', { playerKey: 'player2', x: nextAiX, y: nextAiY });
+        // The bot's paddle movement will be naturally synced to the client via state_update every 33ms
       }
 
       // Paddle Collisions
@@ -349,7 +363,7 @@ class AirHockeyServer {
 
       const dot = puck.vx * nx + puck.vy * ny;
 
-      if (dot > 0) return { ...puck, x: newX, y: newY, hit: true };
+      if (dot > 0) return { ...puck, x: newX, y: newY, hit: false }; // Fix ghost hit by not registering a hit if moving away
 
       let newVx = puck.vx - 2 * dot * nx;
       let newVy = puck.vy - 2 * dot * ny;
