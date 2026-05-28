@@ -258,33 +258,6 @@ class LudoGameServer {
     }
   }
 
-  processNextDiceInQueue(room, playerColor) {
-    if (!room.gameState.diceQueue) room.gameState.diceQueue = [];
-    
-    const assistingPlayerColor = this.getAssistingPlayer(room, playerColor);
-    const targetColor = assistingPlayerColor || playerColor;
-    const tokens = room.gameState.players[targetColor].tokens;
-
-    while (room.gameState.diceQueue.length > 0) {
-      const diceValue = room.gameState.diceQueue[0];
-      const validMoves = this.calculateValidMoves(room, tokens, diceValue, targetColor);
-      
-      if (validMoves.length > 0) {
-        room.gameState.diceValue = diceValue;
-        room.gameState.status = GAME_STATE.MOVING;
-        room.gameState.validMoves = validMoves;
-        return true;
-      } else {
-        // Can't move this dice, discard it
-        room.gameState.diceQueue.shift();
-      }
-    }
-    
-    // Queue is empty or all discarded
-    this.skipTurn(room, playerColor, room.gameState.diceValue || 0); // Next turn
-    return false;
-  }
-
   /**
    * Handle AI bot turn automatically
    */
@@ -313,6 +286,7 @@ class LudoGameServer {
 
         // Roll dice
         const diceValue = Math.floor(Math.random() * 6) + 1;
+        room.gameState.diceValue = diceValue;
         room.gameState.lastDiceRoll = Date.now();
 
         if (!room.gameState.lastDiceValues) {
@@ -320,79 +294,45 @@ class LudoGameServer {
         }
         room.gameState.lastDiceValues[currentColor] = diceValue;
 
-        if (!room.gameState.diceQueue) {
-          room.gameState.diceQueue = [];
-        }
-        room.gameState.diceQueue.push(diceValue);
+        // Calculate valid moves
+        const assistingPlayerColor = this.getAssistingPlayer(room, currentColor);
+        const targetColor = assistingPlayerColor || currentColor;
 
-        // Check for 3 sixes
-        let consecutiveSixes = 0;
-        for (let i = room.gameState.diceQueue.length - 1; i >= 0; i--) {
-          if (room.gameState.diceQueue[i] === 6) consecutiveSixes++;
-          else break;
-        }
+        const validMoves = this.calculateValidMoves(
+          room,
+          room.gameState.players[targetColor].tokens,
+          diceValue,
+          targetColor
+        );
 
-        if (consecutiveSixes === 3) {
-          room.gameState.diceQueue = [];
-          this.broadcastDeltaUpdate(roomId, {
-            type: 'dice_roll',
-            playerColor: currentColor,
-            diceValue: 6,
-            diceQueue: [],
-            validMoves: [],
-            status: GAME_STATE.ROLLING,
-            timestamp: Date.now()
-          });
-          setTimeout(() => {
-            this.nextTurn(room);
-          }, 1000);
-          return;
-        }
-
-        if (diceValue === 6) {
-          room.gameState.status = GAME_STATE.ROLLING;
-          room.gameState.diceValue = 6;
-          room.gameState.validMoves = [];
+        if (validMoves.length > 0) {
+          room.gameState.status = GAME_STATE.MOVING;
+          room.gameState.validMoves = validMoves;
           
           this.broadcastDeltaUpdate(roomId, {
             type: 'dice_roll',
             playerColor: currentColor,
-            diceValue: 6,
-            diceQueue: room.gameState.diceQueue,
+            diceValue,
+            validMoves,
+            status: GAME_STATE.MOVING,
+            timestamp: Date.now()
+          });
+
+          // Trigger the moving part of the bot's turn
+          this.playBotTurn(roomId);
+        } else {
+          // No valid moves, skip turn
+          this.broadcastDeltaUpdate(roomId, {
+            type: 'dice_roll',
+            playerColor: currentColor,
+            diceValue,
             validMoves: [],
             status: GAME_STATE.ROLLING,
             timestamp: Date.now()
           });
 
-          // Bot rolled a 6, so play again
-          setTimeout(() => this.playBotTurn(roomId), 1000);
-        } else {
-          // Process the queue
-          if (this.processNextDiceInQueue(room, currentColor)) {
-            this.broadcastDeltaUpdate(roomId, {
-              type: 'dice_roll',
-              playerColor: currentColor,
-              diceValue: room.gameState.diceValue,
-              diceQueue: room.gameState.diceQueue,
-              validMoves: room.gameState.validMoves,
-              status: GAME_STATE.MOVING,
-              timestamp: Date.now()
-            });
-
-            // Trigger the moving part of the bot's turn
-            this.playBotTurn(roomId);
-          } else {
-            // processNextDiceInQueue already called skipTurn, just broadcast
-            this.broadcastDeltaUpdate(roomId, {
-              type: 'dice_roll',
-              playerColor: currentColor,
-              diceValue: diceValue,
-              diceQueue: room.gameState.diceQueue,
-              validMoves: [],
-              status: GAME_STATE.ROLLING,
-              timestamp: Date.now()
-            });
-          }
+          await new Promise(resolve => setTimeout(resolve, 1000)); // Show dice result briefly
+          this.skipTurn(room, currentColor, diceValue);
         }
       } 
       // 2. MOVING STATE
@@ -418,19 +358,6 @@ class LudoGameServer {
         if (tokenIndex !== null && room.gameState.validMoves.includes(tokenIndex)) {
           const moveResult = this.executeMove(room, currentColor, tokenIndex);
 
-          if (room.gameState.diceQueue && room.gameState.diceQueue.length > 0) {
-            room.gameState.diceQueue.shift();
-          }
-
-          if (moveResult.won) {
-            this.handlePlayerWin(room, moveResult.targetColor || currentColor);
-          } else if (moveResult.bonusTurn) {
-            room.gameState.status = GAME_STATE.ROLLING;
-            room.gameState.validMoves = [];
-          } else {
-            this.processNextDiceInQueue(room, currentColor);
-          }
-
           this.broadcastDeltaUpdate(roomId, {
             type: 'token_move',
             playerColor: currentColor,
@@ -447,18 +374,11 @@ class LudoGameServer {
 
           console.log(`🤖 [BOT MOVE] ${currentColor} moved token ${tokenIndex} to ${moveResult.newPosition}`);
 
-          if (room.gameState.currentPlayer === currentColor) {
-             // Bot still has turn, play again
-             this.broadcastDeltaUpdate(roomId, {
-               type: 'dice_roll',
-               playerColor: currentColor,
-               diceValue: room.gameState.diceValue,
-               diceQueue: room.gameState.diceQueue,
-               validMoves: [],
-               status: GAME_STATE.ROLLING,
-               timestamp: Date.now()
-             });
-             setTimeout(() => this.playBotTurn(roomId), 500);
+          if (moveResult.won) {
+            this.handlePlayerWin(room, moveResult.targetColor || currentColor);
+          } else if (room.gameState.currentPlayer === currentColor) {
+             // Bot got a bonus turn, play again
+             this.playBotTurn(roomId);
           }
         } else {
           // Fallback if AI fails to pick a valid move
@@ -518,75 +438,36 @@ class LudoGameServer {
       }
       room.gameState.lastDiceValues[player.color] = diceValue;
 
-      if (!room.gameState.diceQueue) {
-        room.gameState.diceQueue = [];
-      }
-      room.gameState.diceQueue.push(diceValue);
+      // Calculate valid moves passing room context for quick arrow mode
+      const assistingPlayerColor = this.getAssistingPlayer(room, player.color);
+      const targetColor = assistingPlayerColor || player.color;
 
-      // Check for 3 sixes
-      let consecutiveSixes = 0;
-      for (let i = room.gameState.diceQueue.length - 1; i >= 0; i--) {
-        if (room.gameState.diceQueue[i] === 6) consecutiveSixes++;
-        else break;
-      }
+      const validMoves = this.calculateValidMoves(
+        room,
+        room.gameState.players[targetColor].tokens,
+        diceValue,
+        targetColor
+      );
 
-      if (consecutiveSixes === 3) {
-          room.gameState.diceQueue = [];
-          this.broadcastDeltaUpdate(roomId, {
-            type: 'dice_roll',
-            playerColor: player.color,
-            diceValue: 6,
-            diceQueue: [],
-            validMoves: [],
-            status: GAME_STATE.ROLLING,
-            timestamp: Date.now()
-          });
-          setTimeout(() => {
-            this.nextTurn(room);
-          }, 1000);
-          return;
-        }
-
-      if (diceValue === 6) {
-        room.gameState.status = GAME_STATE.ROLLING;
-        room.gameState.diceValue = 6;
-        room.gameState.validMoves = [];
-        
-        this.broadcastDeltaUpdate(roomId, {
-          type: 'dice_roll',
-          playerColor: player.color,
-          diceValue: 6,
-          diceQueue: room.gameState.diceQueue,
-          validMoves: [],
-          status: room.gameState.status,
-          timestamp: Date.now()
-        });
+      if (validMoves.length > 0) {
+        room.gameState.status = GAME_STATE.MOVING;
+        room.gameState.validMoves = validMoves;
       } else {
-        if (this.processNextDiceInQueue(room, player.color)) {
-          this.broadcastDeltaUpdate(roomId, {
-            type: 'dice_roll',
-            playerColor: player.color,
-            diceValue: room.gameState.diceValue,
-            diceQueue: room.gameState.diceQueue,
-            validMoves: room.gameState.validMoves,
-            status: GAME_STATE.MOVING,
-            timestamp: Date.now()
-          });
-        } else {
-          // processNextDiceInQueue already handled skipTurn, just broadcast roll
-          this.broadcastDeltaUpdate(roomId, {
-            type: 'dice_roll',
-            playerColor: player.color,
-            diceValue: diceValue,
-            diceQueue: room.gameState.diceQueue,
-            validMoves: [],
-            status: GAME_STATE.ROLLING,
-            timestamp: Date.now()
-          });
-        }
+        // No valid moves, auto-skip turn
+        this.skipTurn(room, player.color, diceValue);
       }
 
-      console.log(`🎲 [DICE] ${player.color} rolled ${diceValue}. Queue: ${room.gameState.diceQueue.join(',')}`);
+      // Broadcast delta update (only changed fields)
+      this.broadcastDeltaUpdate(roomId, {
+        type: 'dice_roll',
+        playerColor: player.color,
+        diceValue,
+        validMoves: validMoves.length > 0 ? validMoves : [],
+        status: room.gameState.status,
+        timestamp: Date.now()
+      });
+
+      console.log(`🎲 [DICE] ${player.color} rolled ${diceValue}. Valid moves: ${validMoves.length}`);
     } catch (error) {
       console.error('❌ [DICE ERROR]', error);
       socket.emit('ludo:action_error', { error: error.message });
@@ -658,52 +539,35 @@ class LudoGameServer {
       }
       room.gameState.lastDiceValues[player.color] = diceValue;
 
-      if (!room.gameState.diceQueue || room.gameState.diceQueue.length === 0) {
-        room.gameState.diceQueue = [diceValue];
+      // Calculate valid moves passing room context for quick arrow mode
+      const assistingPlayerColor = this.getAssistingPlayer(room, player.color);
+      const targetColor = assistingPlayerColor || player.color;
+
+      const validMoves = this.calculateValidMoves(
+        room,
+        room.gameState.players[targetColor].tokens,
+        diceValue,
+        targetColor
+      );
+
+      if (validMoves.length > 0) {
+        room.gameState.status = GAME_STATE.MOVING;
+        room.gameState.validMoves = validMoves;
       } else {
-        room.gameState.diceQueue[0] = diceValue;
+        // No valid moves, auto-skip turn
+        this.skipTurn(room, player.color, diceValue);
       }
 
-      if (diceValue === 6) {
-        room.gameState.status = GAME_STATE.ROLLING;
-        room.gameState.diceValue = 6;
-        room.gameState.validMoves = [];
-        
-        this.broadcastDeltaUpdate(roomId, {
-          type: 'dice_roll',
-          playerColor: player.color,
-          diceValue: 6,
-          diceQueue: room.gameState.diceQueue,
-          validMoves: [],
-          status: room.gameState.status,
-          timestamp: Date.now(),
-          isUndo: true
-        });
-      } else {
-        if (this.processNextDiceInQueue(room, player.color)) {
-          this.broadcastDeltaUpdate(roomId, {
-            type: 'dice_roll',
-            playerColor: player.color,
-            diceValue: room.gameState.diceValue,
-            diceQueue: room.gameState.diceQueue,
-            validMoves: room.gameState.validMoves,
-            status: GAME_STATE.MOVING,
-            timestamp: Date.now(),
-            isUndo: true
-          });
-        } else {
-          this.broadcastDeltaUpdate(roomId, {
-            type: 'dice_roll',
-            playerColor: player.color,
-            diceValue: diceValue,
-            diceQueue: room.gameState.diceQueue,
-            validMoves: [],
-            status: GAME_STATE.ROLLING,
-            timestamp: Date.now(),
-            isUndo: true
-          });
-        }
-      }
+      // Broadcast delta update for the new roll
+      this.broadcastDeltaUpdate(roomId, {
+        type: 'dice_roll',
+        playerColor: player.color,
+        diceValue,
+        validMoves: validMoves.length > 0 ? validMoves : [],
+        status: room.gameState.status,
+        timestamp: Date.now(),
+        isUndo: true // Flag to notify frontend
+      });
       
       socket.emit('ludo:undo_success', { diamondsDeducted: 5 });
       console.log(`⏪ [UNDO] ${player.color} paid 5 diamonds and re-rolled ${diceValue}.`);
@@ -759,19 +623,6 @@ class LudoGameServer {
       // Execute move (server-side calculation)
       const moveResult = this.executeMove(room, player.color, tokenIndex);
 
-      if (room.gameState.diceQueue && room.gameState.diceQueue.length > 0) {
-        room.gameState.diceQueue.shift();
-      }
-
-      if (moveResult.won) {
-        this.handlePlayerWin(room, moveResult.targetColor || player.color);
-      } else if (moveResult.bonusTurn) {
-        room.gameState.status = GAME_STATE.ROLLING;
-        room.gameState.validMoves = [];
-      } else {
-        this.processNextDiceInQueue(room, player.color);
-      }
-
       // Broadcast delta update
       this.broadcastDeltaUpdate(roomId, {
         type: 'token_move',
@@ -788,6 +639,11 @@ class LudoGameServer {
       });
 
       console.log(`🎯 [MOVE] ${player.color} moved token ${tokenIndex} to ${moveResult.newPosition}`);
+
+      // Check for game over
+      if (moveResult.won) {
+        this.handlePlayerWin(room, moveResult.targetColor || player.color);
+      }
     } catch (error) {
       console.error('❌ [MOVE ERROR]', error);
       socket.emit('ludo:action_error', { error: error.message });
@@ -912,7 +768,6 @@ class LudoGameServer {
         currentPlayer: null,
         turnOrder: [],
         diceValue: null,
-        diceQueue: [],
         lastDiceValues: {},
         validMoves: [],
         players: {},
@@ -1137,8 +992,13 @@ class LudoGameServer {
     }
 
     // Determine next turn
-    // rolling 6 gave a bonus roll immediately, so we don't grant it here.
-    const bonusTurn = killed !== null || tokenFinished || arrowJumpOccurred;
+    const bonusTurn = diceValue === 6 || killed !== null || tokenFinished || arrowJumpOccurred;
+
+    if (!bonusTurn && !won) {
+      this.nextTurn(room);
+    } else {
+      room.gameState.status = GAME_STATE.ROLLING;
+    }
 
     return {
       newPosition,
@@ -1180,15 +1040,19 @@ class LudoGameServer {
    * Skip turn and move to next player
    */
   skipTurn(room, currentColor, diceValue) {
-    room.gameState.diceQueue = [];
-    this.nextTurn(room);
+    // Don't skip if rolled 6
+    if (diceValue !== 6) {
+      this.nextTurn(room);
+    } else {
+      room.gameState.status = GAME_STATE.ROLLING;
+      this.playBotTurn(room.id); // Trigger in case the bot rolled 6 but couldn't move
+    }
   }
 
   /**
    * Move to next player
    */
   nextTurn(room) {
-    room.gameState.diceQueue = [];
     let currentIndex = room.gameState.turnOrder.indexOf(room.gameState.currentPlayer);
     let nextIndex = (currentIndex + 1) % room.gameState.turnOrder.length;
     let nextPlayer = room.gameState.turnOrder[nextIndex];
@@ -1304,7 +1168,6 @@ class LudoGameServer {
           console.log(`🤝 [TEAM ASSIST] ${playerColor} will now assist ${assistingPlayer}`);
           room.gameState.status = GAME_STATE.ROLLING;
           room.gameState.diceValue = null;
-          room.gameState.diceQueue = [];
           room.gameState.validMoves = [];
           
           // Need to broadcast that it's their turn to roll again
@@ -1417,7 +1280,6 @@ class LudoGameServer {
       currentPlayer: room.gameState.currentPlayer,
       turnOrder: room.gameState.turnOrder,
       diceValue: room.gameState.diceValue,
-      diceQueue: room.gameState.diceQueue || [],
       lastDiceValues: room.gameState.lastDiceValues,
       validMoves: room.gameState.validMoves,
       players: room.gameState.players,
