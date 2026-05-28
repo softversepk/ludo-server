@@ -1292,6 +1292,7 @@ io.on("connection", (socket) => {
       // Update socketId in room players
       if (rooms[roomCode].players[userId]) {
         rooms[roomCode].players[userId].socketId = socket.id;
+        rooms[roomCode].players[userId].connected = true;
       }
       console.log(
         `[AUTO-REJOIN] ${userId} rejoined room ${roomCode} on register`,
@@ -1309,6 +1310,7 @@ io.on("connection", (socket) => {
       userSockets[userId] = socket.id;
       if (room.players[userId]) {
         room.players[userId].socketId = socket.id;
+        room.players[userId].connected = true;
       }
       console.log(
         `[REJOIN] ${userId} explicitly rejoined room ${roomCode}, socket ${socket.id}`,
