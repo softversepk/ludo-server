@@ -338,6 +338,7 @@ class LudoGameServer {
             type: 'dice_roll',
             playerColor: currentColor,
             diceValue: 6,
+            diceQueue: [],
             validMoves: [],
             status: GAME_STATE.ROLLING,
             timestamp: Date.now()
@@ -357,6 +358,7 @@ class LudoGameServer {
             type: 'dice_roll',
             playerColor: currentColor,
             diceValue: 6,
+            diceQueue: room.gameState.diceQueue,
             validMoves: [],
             status: GAME_STATE.ROLLING,
             timestamp: Date.now()
@@ -371,6 +373,7 @@ class LudoGameServer {
               type: 'dice_roll',
               playerColor: currentColor,
               diceValue: room.gameState.diceValue,
+              diceQueue: room.gameState.diceQueue,
               validMoves: room.gameState.validMoves,
               status: GAME_STATE.MOVING,
               timestamp: Date.now()
@@ -384,6 +387,7 @@ class LudoGameServer {
               type: 'dice_roll',
               playerColor: currentColor,
               diceValue: diceValue,
+              diceQueue: room.gameState.diceQueue,
               validMoves: [],
               status: GAME_STATE.ROLLING,
               timestamp: Date.now()
@@ -445,6 +449,15 @@ class LudoGameServer {
 
           if (room.gameState.currentPlayer === currentColor) {
              // Bot still has turn, play again
+             this.broadcastDeltaUpdate(roomId, {
+               type: 'dice_roll',
+               playerColor: currentColor,
+               diceValue: room.gameState.diceValue,
+               diceQueue: room.gameState.diceQueue,
+               validMoves: [],
+               status: GAME_STATE.ROLLING,
+               timestamp: Date.now()
+             });
              setTimeout(() => this.playBotTurn(roomId), 500);
           }
         } else {
@@ -518,20 +531,21 @@ class LudoGameServer {
       }
 
       if (consecutiveSixes === 3) {
-        room.gameState.diceQueue = [];
-        this.broadcastDeltaUpdate(roomId, {
-          type: 'dice_roll',
-          playerColor: player.color,
-          diceValue: 6,
-          validMoves: [],
-          status: GAME_STATE.ROLLING,
-          timestamp: Date.now()
-        });
-        setTimeout(() => {
-          this.nextTurn(room);
-        }, 1000);
-        return;
-      }
+          room.gameState.diceQueue = [];
+          this.broadcastDeltaUpdate(roomId, {
+            type: 'dice_roll',
+            playerColor: player.color,
+            diceValue: 6,
+            diceQueue: [],
+            validMoves: [],
+            status: GAME_STATE.ROLLING,
+            timestamp: Date.now()
+          });
+          setTimeout(() => {
+            this.nextTurn(room);
+          }, 1000);
+          return;
+        }
 
       if (diceValue === 6) {
         room.gameState.status = GAME_STATE.ROLLING;
@@ -542,6 +556,7 @@ class LudoGameServer {
           type: 'dice_roll',
           playerColor: player.color,
           diceValue: 6,
+          diceQueue: room.gameState.diceQueue,
           validMoves: [],
           status: room.gameState.status,
           timestamp: Date.now()
@@ -552,6 +567,7 @@ class LudoGameServer {
             type: 'dice_roll',
             playerColor: player.color,
             diceValue: room.gameState.diceValue,
+            diceQueue: room.gameState.diceQueue,
             validMoves: room.gameState.validMoves,
             status: GAME_STATE.MOVING,
             timestamp: Date.now()
@@ -562,6 +578,7 @@ class LudoGameServer {
             type: 'dice_roll',
             playerColor: player.color,
             diceValue: diceValue,
+            diceQueue: room.gameState.diceQueue,
             validMoves: [],
             status: GAME_STATE.ROLLING,
             timestamp: Date.now()
@@ -656,6 +673,7 @@ class LudoGameServer {
           type: 'dice_roll',
           playerColor: player.color,
           diceValue: 6,
+          diceQueue: room.gameState.diceQueue,
           validMoves: [],
           status: room.gameState.status,
           timestamp: Date.now(),
@@ -667,6 +685,7 @@ class LudoGameServer {
             type: 'dice_roll',
             playerColor: player.color,
             diceValue: room.gameState.diceValue,
+            diceQueue: room.gameState.diceQueue,
             validMoves: room.gameState.validMoves,
             status: GAME_STATE.MOVING,
             timestamp: Date.now(),
@@ -677,6 +696,7 @@ class LudoGameServer {
             type: 'dice_roll',
             playerColor: player.color,
             diceValue: diceValue,
+            diceQueue: room.gameState.diceQueue,
             validMoves: [],
             status: GAME_STATE.ROLLING,
             timestamp: Date.now(),
