@@ -61,6 +61,17 @@ class ChessGameServer {
         this.userSockets.set(userId, socket.id);
         socket.userId = userId;
         console.log(`♟️ [CHESS] User registered: ${userId} -> ${socket.id}`);
+        
+        // Update socket and connected status for any active games
+        for (const [roomId, game] of this.activeGames.entries()) {
+           if (game.players.white.uid === userId) {
+               game.players.white.socketId = socket.id;
+               game.players.white.connected = true;
+           } else if (game.players.black.uid === userId) {
+               game.players.black.socketId = socket.id;
+               game.players.black.connected = true;
+           }
+        }
       });
 
       // Join room (for players navigating to game screen)
@@ -763,27 +774,40 @@ class ChessGameServer {
       }
     }
 
-    // Find and end any active games
+    // Find and handle any active games
     for (const [roomId, game] of this.activeGames.entries()) {
       const whitePlayer = game.players.white;
       const blackPlayer = game.players.black;
 
       if (whitePlayer.uid === userId || blackPlayer.uid === userId) {
-        const winnerId = whitePlayer.uid === userId ? blackPlayer.uid : whitePlayer.uid;
-        
-        this.io.to(roomId).emit('chess:gameEnded', {
-          status: 'playerDisconnected',
-          winnerId,
-          betAmount: game.betAmount
-        });
+        // Mark as disconnected
+        const player = whitePlayer.uid === userId ? whitePlayer : blackPlayer;
+        player.connected = false;
 
-        if (!game.rewardsProcessed) {
-          game.rewardsProcessed = true;
-          this.processRewards(game, winnerId);
-        }
+        // Wait 30 seconds before ending the game
+        setTimeout(() => {
+          const currentGame = this.activeGames.get(roomId);
+          if (currentGame && currentGame.players) {
+            const p = currentGame.players.white.uid === userId ? currentGame.players.white : currentGame.players.black;
+            if (!p.connected && p.socketId === socket.id) {
+              const winnerId = whitePlayer.uid === userId ? blackPlayer.uid : whitePlayer.uid;
+              
+              this.io.to(roomId).emit('chess:gameEnded', {
+                status: 'playerDisconnected',
+                winnerId,
+                betAmount: currentGame.betAmount
+              });
 
-        this.activeGames.delete(roomId);
-        console.log(`♟️ [CHESS] Game ${roomId} ended - player disconnected`);
+              if (!currentGame.rewardsProcessed) {
+                currentGame.rewardsProcessed = true;
+                this.processRewards(currentGame, winnerId);
+              }
+
+              this.activeGames.delete(roomId);
+              console.log(`♟️ [CHESS] Game ${roomId} ended - player disconnected`);
+            }
+          }
+        }, 30000);
       }
     }
 
