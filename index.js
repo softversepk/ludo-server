@@ -11,6 +11,7 @@ const ClubChatServer = require("./clubChatServer");
 const LeaderboardServer = require("./leaderboardServer");
 const ChessGameServer = require("./chessGameServer");
 const TicTacToeGameServer = require("./ticTacToeServer");
+const SnakeGameServer = require("./snakeGameServer");
 const { processUserXP } = require('./xpService');
 const admin = require('firebase-admin');
 
@@ -1224,6 +1225,10 @@ ticTacToeGameServer.initialize();
 
 console.log("✅ Tic Tac Toe Game Server initialized with Authoritative Model");
 
+// Initialize Snake Game Server
+const snakeGameServer = new SnakeGameServer(io, rooms, require('./rewardServiceServer'));
+console.log("✅ Snake Game Server initialized with authoritative physics loop");
+
 // Helper to generate room code
 const generateRoomCode = () => {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -1994,13 +1999,8 @@ io.on("connection", (socket) => {
 
   // SNAKE TURN (Optimized for Snake Vs Snake)
   socket.on("snake_turn", (data) => {
-    const { roomCode, playerKey, angle } = data;
-    const room = rooms[roomCode];
-    if (room && room.gameState && room.gameState.snakes) {
-      if (angle !== undefined) room.gameState.snakes[playerKey].angle = angle;
-      // Broadcast steering to the other player
-      socket.to(roomCode).emit("snake_turn", data);
-    }
+    const { roomCode, playerKey, turnDirection } = data;
+    snakeGameServer.handleTurn(roomCode, playerKey, turnDirection);
   });
 
   // START GAME
@@ -2013,6 +2013,11 @@ io.on("connection", (socket) => {
       room.startedAt = Date.now();
       io.to(roomCode).emit("room_update", room); // To update status
       io.to(roomCode).emit("game_state_update", gameState); // Initial state
+
+      // Start authoritative loop for Snake
+      if (room.mode === 'snake_vs_snake' || room.gameMode === 'snake_vs_snake' || gameState.snakes) {
+        snakeGameServer.startGame(roomCode);
+      }
 
       // Trigger bot turn if the first player is a bot in Tic Tac Toe
       if (room.mode === "tictactoe" && ticTacToeGameServer) {
@@ -2371,6 +2376,9 @@ io.on("connection", (socket) => {
 
     // Handle Chess disconnect
     chessGameServer.handleDisconnect(socket);
+
+    // Handle Snake disconnect
+    snakeGameServer.handleDisconnect(socket);
 
     // Remove from userSockets map (but keep userRooms so they can rejoin)
     for (const [uid, sid] of Object.entries(userSockets)) {
