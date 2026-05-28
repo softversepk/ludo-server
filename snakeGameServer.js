@@ -376,7 +376,7 @@ class SnakeGameServer {
   }
 
   handleDisconnect(socket) {
-    // If a player disconnects, handle game over if playing
+    // If a player disconnects, handle game over if playing after a grace period
     for (const [code, room] of Object.entries(this.rooms)) {
       if (room.mode !== 'snake_vs_snake' && room.gameMode !== 'snake_vs_snake') continue;
       
@@ -385,14 +385,26 @@ class SnakeGameServer {
         const disconnectedUid = playerKeys.find(uid => room.players[uid].socketId === socket.id);
         
         if (disconnectedUid) {
-          const isPlayer1 = disconnectedUid === playerKeys[0];
-          const winner = isPlayer1 ? "player2" : "player1";
+          room.players[disconnectedUid].connected = false;
           
-          if (room.gameState) {
-            room.gameState.playerLeft = isPlayer1 ? "player1" : "player2";
-          }
-          
-          this.handleGameOver(code, winner);
+          // Wait 30 seconds before ending the game to allow for reconnection
+          setTimeout(() => {
+            const currentRoom = this.rooms[code];
+            if (currentRoom && currentRoom.status === "playing" && currentRoom.players[disconnectedUid]) {
+              // Check if they are still disconnected (socketId didn't update to a new connected socket)
+              if (!currentRoom.players[disconnectedUid].connected && currentRoom.players[disconnectedUid].socketId === socket.id) {
+                const isPlayer1 = disconnectedUid === playerKeys[0];
+                const winner = isPlayer1 ? "player2" : "player1";
+                
+                if (currentRoom.gameState) {
+                  currentRoom.gameState.playerLeft = isPlayer1 ? "player1" : "player2";
+                }
+                
+                console.log(`[SNAKE SERVER] Player ${disconnectedUid} failed to reconnect in room ${code}. Ending game.`);
+                this.handleGameOver(code, winner);
+              }
+            }
+          }, 30000);
         }
       }
     }
