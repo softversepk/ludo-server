@@ -932,6 +932,148 @@ app.post('/api/coins/transaction', strictLimiter, authenticateFinancialRequest, 
 });
 
 // ==========================================
+// SECURE FRIEND READ API ENDPOINTS
+// ==========================================
+
+// GET /api/friends/list
+app.get('/api/friends/list', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const db = admin.firestore();
+    const userDoc = await db.collection('users').doc(userId).get();
+    if (!userDoc.exists) return res.json({ success: true, friends: [] });
+    
+    const friendIds = userDoc.data().friends || [];
+    if (friendIds.length === 0) return res.json({ success: true, friends: [] });
+    
+    const friendsData = [];
+    const friendDocs = await Promise.all(friendIds.map(id => db.collection('users').doc(id).get()));
+    
+    for (const doc of friendDocs) {
+      if (doc.exists) {
+        const data = doc.data();
+        friendsData.push({
+          id: doc.id,
+          username: data.username || data.displayName || 'Unknown',
+          avatar: data.avatar || 'default',
+          level: data.level || 1,
+          lastActive: data.lastActive,
+          currentGame: data.currentGame,
+          settings: data.settings
+        });
+      }
+    }
+    
+    res.json({ success: true, friends: friendsData });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// GET /api/friends/requests/pending
+app.get('/api/friends/requests/pending', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const db = admin.firestore();
+    const requestsQuery = await db.collection('friendRequests')
+      .where('toUserId', '==', userId)
+      .where('status', '==', 'pending')
+      .get();
+      
+    const requests = [];
+    for (const docSnap of requestsQuery.docs) {
+      const data = docSnap.data();
+      const senderDoc = await db.collection('users').doc(data.fromUserId).get();
+      const senderData = senderDoc.exists ? senderDoc.data() : {};
+      requests.push({
+        id: docSnap.id,
+        ...data,
+        senderName: senderData.username || senderData.displayName || 'Unknown',
+        senderAvatar: senderData.avatar || 'default',
+        senderLevel: senderData.level || 1,
+      });
+    }
+    
+    res.json({ success: true, requests });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// GET /api/friends/search
+app.get('/api/friends/search', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const db = admin.firestore();
+    
+    const userDoc = await db.collection('users').doc(userId).get();
+    const currentFriends = userDoc.exists ? (userDoc.data().friends || []) : [];
+    
+    // Securely fetch a limited number of users to prevent memory overload
+    const usersQuery = await db.collection('users').limit(150).get();
+    
+    const users = [];
+    usersQuery.forEach(docSnap => {
+      if (docSnap.id !== userId && !currentFriends.includes(docSnap.id) && !docSnap.id.startsWith('bot_')) {
+        const data = docSnap.data();
+        if (!data.settings?.privateAccount) {
+          users.push({
+            id: docSnap.id,
+            name: data.username || data.displayName || 'Unknown',
+            avatar: data.avatar || 'default',
+            level: data.level || 1,
+            club: data.clubName || null,
+          });
+        }
+      }
+    });
+    
+    res.json({ success: true, users });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// GET /api/friends/status/:friendId
+app.get('/api/friends/status/:friendId', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const fromUserId = req.userId;
+    const toUserId = req.params.friendId;
+    const db = admin.firestore();
+    
+    const userDoc = await db.collection('users').doc(fromUserId).get();
+    const friends = userDoc.exists ? (userDoc.data().friends || []) : [];
+    if (friends.includes(toUserId)) {
+      return res.json({ success: true, status: 'friends' });
+    }
+    
+    const sentQuery = await db.collection('friendRequests')
+      .where('fromUserId', '==', fromUserId)
+      .where('toUserId', '==', toUserId)
+      .where('status', '==', 'pending')
+      .get();
+      
+    if (!sentQuery.empty) {
+      return res.json({ success: true, status: 'pending_sent' });
+    }
+    
+    const receivedQuery = await db.collection('friendRequests')
+      .where('fromUserId', '==', toUserId)
+      .where('toUserId', '==', fromUserId)
+      .where('status', '==', 'pending')
+      .get();
+      
+    if (!receivedQuery.empty) {
+      return res.json({ success: true, status: { status: 'pending_received', requestId: receivedQuery.docs[0].id } });
+    }
+    
+    res.json({ success: true, status: 'none' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==========================================
 // SECURE FRIEND REQUEST SYSTEM
 // ==========================================
 
