@@ -83,13 +83,17 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Production CORS configuration with security
 const corsOptions = {
-  origin: "*", // Allow all origins for easier connection during development and testing
-  methods: ["GET", "POST"],
+  origin: function (origin, callback) {
+    callback(null, true); // Allow all origins dynamically
+  },
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "x-user-id"],
   credentials: true,
   optionsSuccessStatus: 200 // For legacy browser support
 };
 
 app.use(cors(corsOptions));
+app.options('*', cors(corsOptions)); // Handle preflight requests for all routes
 
 // Health check endpoint for monitoring
 app.get('/health', (req, res) => {
