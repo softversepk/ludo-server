@@ -108,41 +108,41 @@ app.post('/api/economy/update', strictLimiter, authenticateFinancialRequest, asy
   try {
     const { currency, amount, type, reason, description } = req.body;
     const userId = req.userId;
-    
+
     if (!currency || !['coins', 'gems'].includes(currency)) {
       return res.status(400).json({ error: 'Invalid currency' });
     }
-    
+
     if (typeof amount !== 'number') {
       return res.status(400).json({ error: 'Invalid amount' });
     }
-    
+
     const userRef = admin.firestore().collection('users').doc(userId);
-    
+
     await admin.firestore().runTransaction(async (transaction) => {
       const userDoc = await transaction.get(userRef);
       if (!userDoc.exists) {
         throw new Error('User not found');
       }
-      
+
       const userData = userDoc.data();
       const currentBalance = userData[currency] || 0;
-      
+
       if (amount < 0 && currentBalance < Math.abs(amount)) {
         throw new Error(`Insufficient ${currency}`);
       }
-      
+
       const updates = {
         [currency]: admin.firestore.FieldValue.increment(amount)
       };
-      
+
       if (currency === 'coins' && amount > 0) {
         updates.totalCoinsEarned = admin.firestore.FieldValue.increment(amount);
         updates.weeklyCoins = admin.firestore.FieldValue.increment(amount);
       }
-      
+
       transaction.update(userRef, updates);
-      
+
       // Log diamond transactions as in diamondService
       if (currency === 'gems') {
         const txRef = admin.firestore().collection('diamondTransactions').doc();
@@ -156,7 +156,7 @@ app.post('/api/economy/update', strictLimiter, authenticateFinancialRequest, asy
         });
       }
     });
-    
+
     res.status(200).json({ success: true, message: 'Economy updated successfully' });
   } catch (error) {
     console.error('Error in /api/economy/update:', error.message);
@@ -168,7 +168,7 @@ app.post('/api/economy/update', strictLimiter, authenticateFinancialRequest, asy
 app.post('/api/gifts/send', strictLimiter, async (req, res) => {
   try {
     const { senderId, recipientId, giftId, clubId, cost } = req.body;
-    
+
     if (!senderId || !giftId || !clubId || !cost) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
@@ -176,14 +176,14 @@ app.post('/api/gifts/send', strictLimiter, async (req, res) => {
     // Verify sender has enough gems
     const senderRef = admin.firestore().collection('users').doc(senderId);
     const senderDoc = await senderRef.get();
-    
+
     if (!senderDoc.exists) {
       return res.status(404).json({ error: 'Sender not found' });
     }
-    
+
     const senderData = senderDoc.data();
     const currentGems = senderData.gems || 0;
-    
+
     if (currentGems < cost) {
       return res.status(400).json({ error: 'Not enough gems' });
     }
@@ -193,15 +193,15 @@ app.post('/api/gifts/send', strictLimiter, async (req, res) => {
       // We must get the recipient first if there is one to perform reads before writes
       let recipientRef = null;
       let recipientDoc = null;
-      
+
       if (recipientId && recipientId !== 'all') {
         recipientRef = admin.firestore().collection('users').doc(recipientId);
         recipientDoc = await transaction.get(recipientRef);
       }
-      
+
       // Get sender in transaction
       const tSenderDoc = await transaction.get(senderRef);
-      
+
       if (!tSenderDoc.exists) {
         throw new Error('Sender not found in transaction');
       }
@@ -215,7 +215,7 @@ app.post('/api/gifts/send', strictLimiter, async (req, res) => {
       transaction.update(senderRef, {
         gems: admin.firestore.FieldValue.increment(-cost)
       });
-      
+
       // 2. Add to recipient if not 'all'
       if (recipientRef && recipientDoc && recipientDoc.exists) {
         transaction.update(recipientRef, {
@@ -233,54 +233,54 @@ app.post('/api/gifts/send', strictLimiter, async (req, res) => {
 
 // AGORA TOKEN GENERATION ENDPOINT (Secure)
 app.get('/rtcToken', strictLimiter, authenticateFinancialRequest, (req, res) => {
-    res.header('Cache-Control', 'private, no-cache, no-store, must-revalidate');
-    res.header('Expires', '-1');
-    res.header('Pragma', 'no-cache');
+  res.header('Cache-Control', 'private, no-cache, no-store, must-revalidate');
+  res.header('Expires', '-1');
+  res.header('Pragma', 'no-cache');
 
-    const channelName = req.query.channelName;
-    if (!channelName) {
-        return res.status(400).json({ error: 'channelName is required' });
-    }
+  const channelName = req.query.channelName;
+  if (!channelName) {
+    return res.status(400).json({ error: 'channelName is required' });
+  }
 
-    let uid = req.query.uid;
-    if (!uid || uid === '') {
-        uid = 0; 
-    }
+  let uid = req.query.uid;
+  if (!uid || uid === '') {
+    uid = 0;
+  }
 
-    let role = RtcRole.SUBSCRIBER;
-    if (req.query.role === 'publisher') {
-        role = RtcRole.PUBLISHER;
-    }
+  let role = RtcRole.SUBSCRIBER;
+  if (req.query.role === 'publisher') {
+    role = RtcRole.PUBLISHER;
+  }
 
-    let expireTime = req.query.expireTime;
-    if (!expireTime || expireTime === '') {
-        expireTime = 3600 * 24;
+  let expireTime = req.query.expireTime;
+  if (!expireTime || expireTime === '') {
+    expireTime = 3600 * 24;
+  } else {
+    expireTime = parseInt(expireTime, 10);
+  }
+
+  const currentTime = Math.floor(Date.now() / 1000);
+  const privilegeExpireTime = currentTime + expireTime;
+
+  const APP_ID = process.env.AGORA_APP_ID || '4ca360f96c324fe39683d5323f279bb2';
+  const APP_CERTIFICATE = process.env.AGORA_APP_CERTIFICATE || '219a06c3b3034c079782e11cc690cf1b';
+
+  try {
+    let token;
+    if (req.query.tokentype === 'userAccount') {
+      token = RtcTokenBuilder.buildTokenWithUserAccount(
+        APP_ID, APP_CERTIFICATE, channelName, uid, role, privilegeExpireTime
+      );
     } else {
-        expireTime = parseInt(expireTime, 10);
+      token = RtcTokenBuilder.buildTokenWithUid(
+        APP_ID, APP_CERTIFICATE, channelName, uid, role, privilegeExpireTime
+      );
     }
-
-    const currentTime = Math.floor(Date.now() / 1000);
-    const privilegeExpireTime = currentTime + expireTime;
-
-    const APP_ID = process.env.AGORA_APP_ID || '4ca360f96c324fe39683d5323f279bb2';
-    const APP_CERTIFICATE = process.env.AGORA_APP_CERTIFICATE || '219a06c3b3034c079782e11cc690cf1b';
-
-    try {
-        let token;
-        if (req.query.tokentype === 'userAccount') {
-            token = RtcTokenBuilder.buildTokenWithUserAccount(
-                APP_ID, APP_CERTIFICATE, channelName, uid, role, privilegeExpireTime
-            );
-        } else {
-            token = RtcTokenBuilder.buildTokenWithUid(
-                APP_ID, APP_CERTIFICATE, channelName, uid, role, privilegeExpireTime
-            );
-        }
-        return res.json({ token: token });
-    } catch (error) {
-        console.error("Agora Token Generation Error:", error);
-        return res.status(500).json({ error: "Failed to generate token" });
-    }
+    return res.json({ token: token });
+  } catch (error) {
+    console.error("Agora Token Generation Error:", error);
+    return res.status(500).json({ error: "Failed to generate token" });
+  }
 });
 
 // Server stats endpoint with authentication
@@ -324,7 +324,7 @@ async function authenticateFinancialRequest(req, res, next) {
     // Check if it's a valid JWT from Firebase
     if (token.length > 50 && admin.apps.length > 0) {
       const decodedToken = await admin.auth().verifyIdToken(token);
-      
+
       // Ensure the token belongs to the requesting user
       if (decodedToken.uid !== userId) {
         return res.status(403).json({ error: 'Token user mismatch' });
@@ -378,14 +378,14 @@ app.post('/api/game/undo-roll', strictLimiter, authenticateFinancialRequest, asy
 
     const actualRoomId = roomId || matchId || 'local_match';
     const trackerKey = `${actualRoomId}_${userId}`;
-    
+
     let undoData = undoTracker.get(trackerKey) || { count: 0, lastUpdate: Date.now() };
-    
+
     const cost = getUndoCost(undoData.count);
-    
+
     if (cost === -1) {
-      return res.status(403).json({ 
-        success: false, 
+      return res.status(403).json({
+        success: false,
         error: 'Max undo limit reached for this match',
         undoCount: undoData.count
       });
@@ -427,7 +427,7 @@ app.post('/api/game/undo-roll', strictLimiter, authenticateFinancialRequest, asy
 
       newGems = currentGems - cost;
       transaction.update(userRef, { gems: newGems });
-      
+
       // Generate secure random dice roll on backend
       generatedDiceValue = Math.floor(Math.random() * 6) + 1;
     });
@@ -463,40 +463,40 @@ app.get('/api/home/data', strictLimiter, authenticateFinancialRequest, async (re
   try {
     const userId = req.userId;
     const db = admin.firestore();
-    
+
     const [thumbnailsSnap, chestsSnap, userSnap] = await Promise.all([
       db.collection('systemSettings').doc('gameThumbnails').get(),
       db.collection('chest_boxes').where('isActive', '==', true).get(),
       db.collection('users').doc(userId).get()
     ]);
-    
+
     const dynamicThumbnails = thumbnailsSnap.exists ? thumbnailsSnap.data() : {};
     const userProfile = userSnap.exists ? userSnap.data() : {};
-    
+
     const chestBoxes = [];
     chestsSnap.forEach(doc => {
       chestBoxes.push({ id: doc.id, ...doc.data() });
     });
-    
+
     const currentTime = Date.now();
     const processedChests = chestBoxes.map(chest => {
       const isDailyLogin = chest.requirementType === 'daily_login';
       const isWins = chest.requirementType === 'wins';
       const isTokenKills = chest.requirementType === 'token_kills';
       const isOneTime = !isDailyLogin && !isWins && !isTokenKills;
-      
+
       let isClaimed = false;
       let showCountdown = false;
       let progressText = '';
       let showProgress = false;
       let isReady = false;
-      
+
       const target = parseFloat(chest.requirements) || 1;
       let currentProgress = 0;
       let targetProgress = target;
       const isTimerBased = isDailyLogin;
       let timeRemaining = 0;
-      
+
       if (isDailyLogin) {
         const nextTime = userProfile?.dailyLoginChests?.[chest.id];
         if (nextTime && currentTime < nextTime) {
@@ -540,7 +540,7 @@ app.get('/api/home/data', strictLimiter, authenticateFinancialRequest, async (re
         currentProgress = isClaimed ? 1 : 0;
         if (!isClaimed) isReady = true;
       }
-      
+
       let progressPercent = 100;
       if (isTimerBased) {
         const targetMs = target * 24 * 60 * 60 * 1000;
@@ -548,7 +548,7 @@ app.get('/api/home/data', strictLimiter, authenticateFinancialRequest, async (re
       } else {
         progressPercent = Math.min(100, Math.max(0, (currentProgress / targetProgress) * 100));
       }
-      
+
       return {
         ...chest,
         state: {
@@ -566,7 +566,7 @@ app.get('/api/home/data', strictLimiter, authenticateFinancialRequest, async (re
         }
       };
     });
-    
+
     res.json({
       success: true,
       data: {
@@ -596,7 +596,7 @@ app.post('/api/chest/claim', strictLimiter, authenticateFinancialRequest, async 
     }
 
     const db = admin.firestore();
-    
+
     // Run the entire claim process in a transaction
     await db.runTransaction(async (transaction) => {
       const chestRef = db.collection('chest_boxes').doc(chestId);
@@ -687,7 +687,7 @@ app.post('/api/chest/claim', strictLimiter, authenticateFinancialRequest, async 
 
       if (gemsReward > 0) {
         updates.gems = admin.firestore.FieldValue.increment(gemsReward);
-        
+
         // Log diamond transaction
         const txRef = db.collection('diamondTransactions').doc();
         transaction.set(txRef, {
@@ -709,6 +709,211 @@ app.post('/api/chest/claim', strictLimiter, authenticateFinancialRequest, async 
     console.error('Error claiming chest:', error.message);
     // Return 200 with success: false for business logic errors to prevent browser console 400 errors
     res.status(200).json({ success: false, error: error.message || 'Failed to claim chest' });
+  }
+});
+
+// SECURE WEEKLY LEADERBOARD SYSTEM ENDPOINTS
+let playerLeaderboardCache = {
+  data: null,
+  timestamp: 0
+};
+
+// 1. Fetch top 100 players from Firestore ordered by weeklyProfitCoins descending (Cached for 5s)
+app.get('/api/leaderboard', strictLimiter, async (req, res) => {
+  try {
+    const now = Date.now();
+    if (playerLeaderboardCache.data && (now - playerLeaderboardCache.timestamp) < 5000) {
+      return res.json({ success: true, data: playerLeaderboardCache.data, cached: true });
+    }
+
+    if (!admin.apps.length) {
+      return res.status(503).json({ success: false, error: 'Firebase Admin not initialized' });
+    }
+    const db = admin.firestore();
+    const snapshot = await db.collection('users')
+      .orderBy('weeklyProfitCoins', 'desc')
+      .limit(100)
+      .get();
+
+    const players = snapshot.docs.map((doc, index) => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        username: data.username || 'Anonymous',
+        avatar: data.avatar || 'default',
+        weeklyProfitCoins: data.weeklyProfitCoins || 0,
+        gems: data.gems || 0,
+        coins: data.coins || 0,
+        rank: index + 1
+      };
+    });
+
+    playerLeaderboardCache = {
+      data: players,
+      timestamp: now
+    };
+
+    res.json({ success: true, data: players });
+  } catch (error) {
+    console.error('Error fetching secure leaderboard:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch secure leaderboard' });
+  }
+});
+
+// 2. Fetch current user's current rank, eligible diamonds, and coins rewards
+app.get('/api/leaderboard/my-reward', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const userId = req.userId;
+
+    if (!admin.apps.length) {
+      return res.status(503).json({ error: 'Firebase Admin not initialized' });
+    }
+    const db = admin.firestore();
+    const userDoc = await db.collection('users').doc(userId).get();
+
+    if (!userDoc.exists) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    const userData = userDoc.data();
+    const weeklyProfitCoins = userData.weeklyProfitCoins || 0;
+
+    // Use Firestore count() for highly optimized rank calculation
+    const countSnapshot = await db.collection('users')
+      .where('weeklyProfitCoins', '>', weeklyProfitCoins)
+      .count()
+      .get();
+
+    const rank = countSnapshot.data().count + 1;
+
+    // Get total players
+    const totalSnapshot = await db.collection('users').count().get();
+    const totalPlayers = totalSnapshot.data().count;
+
+    const rewards = {
+      1: { diamonds: 100, coins: 100000 }, // 1st place
+      2: { diamonds: 50, coins: 50000 },   // 2nd place
+      3: { diamonds: 30, coins: 30000 },   // 3rd place
+      default: { diamonds: 10, coins: 5000 } // 4th place and below
+    };
+
+    const reward = rewards[rank] || rewards.default;
+
+    res.json({
+      success: true,
+      rank,
+      reward,
+      totalPlayers
+    });
+  } catch (error) {
+    console.error('Error fetching user league reward:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch user reward' });
+  }
+});
+
+// 3. Process weekly reward distribution and reset all weeklyProfitCoins to 0 inside transaction/batch
+app.post('/api/leaderboard/distribute', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { leagueId } = req.body;
+
+    if (!leagueId) {
+      return res.status(400).json({ success: false, error: 'Missing league ID' });
+    }
+
+    if (!admin.apps.length) {
+      return res.status(503).json({ error: 'Firebase Admin not initialized' });
+    }
+
+    const db = admin.firestore();
+
+    // Check if already distributed
+    const existing = await db.collection('notifications')
+      .where('leagueId', '==', leagueId)
+      .where('type', '==', 'league_reward')
+      .limit(1)
+      .get();
+
+    if (!existing.empty) {
+      console.log(`🏆 [DISTRIBUTE] Rewards already distributed for league ${leagueId}`);
+      return res.json({ success: true, rewardedCount: 0, alreadyDistributed: true });
+    }
+
+    // Get all players with weeklyProfitCoins > 0
+    const snapshot = await db.collection('users')
+      .where('weeklyProfitCoins', '>', 0)
+      .orderBy('weeklyProfitCoins', 'desc')
+      .get();
+
+    const topPlayers = snapshot.docs.map((doc, index) => ({
+      id: doc.id,
+      ...doc.data(),
+      rank: index + 1
+    }));
+
+    if (topPlayers.length === 0) {
+      console.log('No active players to reward this week');
+      return res.json({ success: true, rewardedCount: 0 });
+    }
+
+    console.log(`🏆 [DISTRIBUTE] Found ${topPlayers.length} players to reward for league ${leagueId}`);
+
+    const rewards = {
+      1: { diamonds: 100, coins: 100000 },
+      2: { diamonds: 50, coins: 50000 },
+      3: { diamonds: 30, coins: 30000 },
+      default: { diamonds: 10, coins: 5000 }
+    };
+
+    // Perform updates in batched chunks to respect Firestore's 500-write limit
+    let batch = db.batch();
+    let opCount = 0;
+    const batches = [batch];
+
+    for (const player of topPlayers) {
+      const rank = player.rank;
+      const reward = rewards[rank] || rewards.default;
+      const userRef = db.collection('users').doc(player.id);
+      const notificationRef = db.collection('notifications').doc();
+
+      // Check if we need a new batch (each player needs 2 operations: 1 update, 1 set)
+      if (opCount >= 400) {
+        batch = db.batch();
+        batches.push(batch);
+        opCount = 0;
+      }
+
+      // Update user balances
+      batch.update(userRef, {
+        gems: admin.firestore.FieldValue.increment(reward.diamonds),
+        coins: admin.firestore.FieldValue.increment(reward.coins),
+        weeklyProfitCoins: 0 // Reset weeklyProfitCoins to 0 securely inside the batch!
+      });
+      opCount++;
+
+      // Create notification
+      batch.set(notificationRef, {
+        userId: player.id,
+        type: 'league_reward',
+        title: `League Reward - Rank #${rank}`,
+        message: `You earned ${reward.diamonds} diamonds and ${reward.coins.toLocaleString()} coins!`,
+        diamonds: reward.diamonds,
+        coins: reward.coins,
+        rank: rank,
+        leagueId,
+        read: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      opCount++;
+    }
+
+    // Commit all batches in parallel
+    await Promise.all(batches.map(b => b.commit()));
+
+    console.log(`✅ [DISTRIBUTE] Completed reward distribution & weeklyProfitCoins resets for ${topPlayers.length} users`);
+    res.json({ success: true, rewardedCount: topPlayers.length });
+  } catch (error) {
+    console.error('Error in /api/leaderboard/distribute:', error);
+    res.status(500).json({ success: false, error: error.message || 'Internal server error' });
   }
 });
 
@@ -740,7 +945,7 @@ app.post('/api/game/update-stats', strictLimiter, authenticateFinancialRequest, 
     } else if (stats.played && stats.won === false) {
       updates.winStreak = 0;
     }
-    
+
     if (stats.played) updates.gamesPlayed = admin.firestore.FieldValue.increment(1);
     if (stats.kills) updates.tokensKilled = admin.firestore.FieldValue.increment(stats.kills);
 
@@ -750,7 +955,7 @@ app.post('/api/game/update-stats', strictLimiter, authenticateFinancialRequest, 
 
     // Fetch the updated doc to return the new values
     const updatedDoc = await userRef.get();
-    
+
     res.json({
       success: true,
       stats: {
@@ -780,7 +985,7 @@ app.post('/api/game/award-xp', strictLimiter, authenticateFinancialRequest, asyn
     }
 
     const xpResult = await processUserXP(userId, action);
-    
+
     if (xpResult.success) {
       res.json(xpResult);
     } else {
@@ -917,7 +1122,7 @@ app.post('/api/gift/send', strictLimiter, authenticateFinancialRequest, async (r
       // 4. Get receiver to verify they exist
       const receiverDoc = await transaction.get(receiverRef);
       if (!receiverDoc.exists) {
-         throw new Error('Receiver not found');
+        throw new Error('Receiver not found');
       }
 
       // 5. Deduct coins from sender
@@ -1064,7 +1269,7 @@ app.post('/api/friends/request/send', strictLimiter, authenticateFinancialReques
     if (fromUserId !== req.userId) return res.status(403).json({ success: false, error: 'Unauthorized sender' });
 
     const db = admin.firestore();
-    
+
     // Check if already friends
     const userDoc = await db.collection('users').doc(fromUserId).get();
     const friends = userDoc.data()?.friends || [];
@@ -1081,12 +1286,12 @@ app.post('/api/friends/request/send', strictLimiter, authenticateFinancialReques
       .where('toUserId', '==', toUserId)
       .where('status', '==', 'pending')
       .get();
-      
+
     if (!existingRequests.empty) return res.status(400).json({ success: false, error: 'Request already sent' });
 
     // Create request and notification via batch
     const batch = db.batch();
-    
+
     const requestRef = db.collection('friendRequests').doc();
     batch.set(requestRef, {
       fromUserId,
@@ -1122,18 +1327,18 @@ app.post('/api/friends/request/accept', strictLimiter, authenticateFinancialRequ
     if (toUserId !== req.userId) return res.status(403).json({ success: false, error: 'Unauthorized user' });
 
     const db = admin.firestore();
-    
+
     await db.runTransaction(async (transaction) => {
       const requestRef = db.collection('friendRequests').doc(requestId);
       const requestDoc = await transaction.get(requestRef);
-      
+
       if (!requestDoc.exists || requestDoc.data().status !== 'pending') {
         throw new Error('Request not found or not pending');
       }
 
       const fromUserRef = db.collection('users').doc(fromUserId);
       const toUserRef = db.collection('users').doc(toUserId);
-      
+
       transaction.update(requestRef, {
         status: 'accepted',
         acceptedAt: admin.firestore.FieldValue.serverTimestamp()
@@ -1142,7 +1347,7 @@ app.post('/api/friends/request/accept', strictLimiter, authenticateFinancialRequ
       transaction.update(fromUserRef, {
         friends: admin.firestore.FieldValue.arrayUnion(toUserId)
       });
-      
+
       transaction.update(toUserRef, {
         friends: admin.firestore.FieldValue.arrayUnion(fromUserId)
       });
@@ -1173,7 +1378,7 @@ app.post('/api/friends/request/reject', strictLimiter, authenticateFinancialRequ
 
     const db = admin.firestore();
     const batch = db.batch();
-    
+
     const requestRef = db.collection('friendRequests').doc(requestId);
     batch.update(requestRef, {
       status: 'rejected',
@@ -1206,14 +1411,14 @@ app.post('/api/friends/remove', strictLimiter, authenticateFinancialRequest, asy
 
     const db = admin.firestore();
     const batch = db.batch();
-    
+
     const userRef = db.collection('users').doc(userId);
     const friendRef = db.collection('users').doc(friendId);
-    
+
     batch.update(userRef, {
       friends: admin.firestore.FieldValue.arrayRemove(friendId)
     });
-    
+
     batch.update(friendRef, {
       friends: admin.firestore.FieldValue.arrayRemove(userId)
     });
@@ -1453,7 +1658,7 @@ io.on("connection", (socket) => {
   // CREATE ROOM
   socket.on("create_room", async (hostData, callback) => {
     const betAmount = hostData.betAmount || 100;
-    
+
     // Check and deduct coins before creating room
     if (betAmount > 0) {
       const deductionSuccess = await secureDeductCoins(hostData.uid, betAmount);
@@ -1528,7 +1733,7 @@ io.on("connection", (socket) => {
     }
 
     const betAmount = room.betAmount || 100;
-    
+
     // Check and deduct coins before joining room
     if (betAmount > 0) {
       const deductionSuccess = await secureDeductCoins(playerData.uid, betAmount);
@@ -1602,7 +1807,7 @@ io.on("connection", (socket) => {
     });
 
     const { mode, betAmount } = playerData;
-    
+
     // Check and deduct coins before proceeding with matchmaking
     if (betAmount > 0) {
       const deductionSuccess = await secureDeductCoins(playerData.uid, betAmount);
@@ -1626,14 +1831,14 @@ io.on("connection", (socket) => {
       const maxPlayers = room.maxPlayers;
       const hasSpace = currentCount < maxPlayers;
       const isWaiting = room.status === "waiting";
-      
+
       // Allow tictactoe and tournament modes to match properly
       const modeMatches =
         !room.mode ||
         room.mode === mode ||
         (mode === "tictactoe" && room.mode === "tictactoe") ||
         (mode === "tournament" && room.mode === "tournament");
-        
+
       const betMatches = (room.betAmount || 100) === betAmount;
       const notOwnRoom = room.host !== playerData.uid;
 
@@ -1673,12 +1878,12 @@ io.on("connection", (socket) => {
       console.log("🆕 [MATCHMAKING] No match found, creating new room...");
       // Reuse create room logic logic
       const roomCode = generateRoomCode();
-      
+
       // Determine max players based on mode
       let defaultMaxPlayers = 2;
       if (playerData.mode === "tournament") defaultMaxPlayers = 4; // Tournaments have 4 players per match
       else if (playerData.playerCount) defaultMaxPlayers = playerData.playerCount;
-      
+
       const rules = {
         playerCount: playerData.playerCount || defaultMaxPlayers,
         maxPlayers: playerData.maxPlayers || defaultMaxPlayers,
@@ -1724,12 +1929,12 @@ io.on("connection", (socket) => {
     const room = rooms[roomCode];
     if (room) {
       console.log(`Matchmaking cancelled for room ${roomCode}`);
-      
+
       // Refund host's bet if the room is still waiting
       if (room.status === "waiting" && room.host) {
         await secureRefundCoins(room.host, room.betAmount || 100);
       }
-      
+
       io.to(roomCode).emit("room_cancelled");
       delete rooms[roomCode];
       socket.leave(roomCode);
@@ -1744,7 +1949,7 @@ io.on("connection", (socket) => {
       if (room.status === "waiting") {
         await secureRefundCoins(playerId, room.betAmount || 100);
       }
-      
+
       delete room.players[playerId];
       socket.leave(roomCode);
 
@@ -1772,12 +1977,12 @@ io.on("connection", (socket) => {
     if (room) {
       // SECURITY: Block unauthorized state updates
       const senderId = Object.keys(userSockets).find(key => userSockets[key] === socket.id);
-      
+
       // If it's a bot's turn (or was just a bot's turn), only the host can update the state
       if (room.gameState && room.gameState.currentPlayer) {
         const previousPlayerId = room.players[room.gameState.currentPlayer]?.uid;
         const previousPlayerIsBot = room.players[room.gameState.currentPlayer]?.isBot || String(previousPlayerId).startsWith('bot_');
-        
+
         // If the update is attempting to modify a bot's state, verify the sender is the host
         if (previousPlayerIsBot && senderId && senderId !== room.host) {
           console.warn(`[SECURITY] Blocked unauthorized bot state update from non-host ${senderId} in room ${roomCode}`);
@@ -1792,12 +1997,12 @@ io.on("connection", (socket) => {
           if (gameState.lastDiceValues && gameState.lastDiceValues[room.gameState.currentPlayer]) {
             const clientDice = gameState.lastDiceValues[room.gameState.currentPlayer];
             if (clientDice !== expected.diceValue) {
-               console.warn(`[SECURITY] Blocked hacked bot dice roll in room ${roomCode}. Expected ${expected.diceValue}, got ${clientDice}`);
-               if (callback) callback({ success: false, error: "Invalid bot move" });
-               return;
+              console.warn(`[SECURITY] Blocked hacked bot dice roll in room ${roomCode}. Expected ${expected.diceValue}, got ${clientDice}`);
+              if (callback) callback({ success: false, error: "Invalid bot move" });
+              return;
             }
           }
-          
+
           // Verify token moved
           const oldTokens = room.gameState.players?.[expected.playerColor]?.tokens;
           const newTokens = gameState.players?.[expected.playerColor]?.tokens;
@@ -1828,7 +2033,7 @@ io.on("connection", (socket) => {
       // --- LUDO TEAMUP SECURE MOVE VALIDATION ---
       if ((room.isTeam || room.isTeamMode) && gameState && gameState.players && room.gameState && room.gameState.players) {
         const isLudo = !room.mode || room.mode === 'classic' || room.mode === 'quick' || room.mode === 'arrow' || room.mode === 'quick_arrow';
-        
+
         if (isLudo && senderId) {
           // Find which player the sender is
           const senderPlayer = Object.values(room.players).find(p => p.uid === senderId || p.id === senderId);
@@ -1836,16 +2041,16 @@ io.on("connection", (socket) => {
             const senderColor = senderPlayer.color;
             const teamA = ['RED', 'YELLOW'];
             const teamB = ['GREEN', 'BLUE'];
-            
+
             let teammateColor = null;
             if (teamA.includes(senderColor)) teammateColor = teamA.find(c => c !== senderColor);
             else if (teamB.includes(senderColor)) teammateColor = teamB.find(c => c !== senderColor);
-            
+
             // Check if any of teammate's tokens moved
             if (teammateColor && gameState.players[teammateColor] && room.gameState.players[teammateColor]) {
               const newTokens = gameState.players[teammateColor].tokens;
               const oldTokens = room.gameState.players[teammateColor].tokens;
-              
+
               let teammateTokenMoved = false;
               if (newTokens && oldTokens) {
                 for (let i = 0; i < 4; i++) {
@@ -1858,18 +2063,18 @@ io.on("connection", (socket) => {
                   }
                 }
               }
-              
+
               if (teammateTokenMoved) {
                 // Sender moved teammate's token! Are they allowed to?
                 // 1. Sender must have won
                 const senderWon = room.gameState.winners && room.gameState.winners.includes(senderColor);
-                
+
                 if (!senderWon) {
                   console.warn(`[SECURITY] Blocked hacked teammate assist! ${senderColor} tried to move ${teammateColor}'s token but ${senderColor} hasn't won yet!`);
                   if (callback) callback({ success: false, error: "Cannot assist teammate until you win" });
                   return; // Block update
                 }
-                
+
                 // 2. It must be sender's turn
                 if (room.gameState.currentPlayer !== senderColor) {
                   console.warn(`[SECURITY] Blocked hacked teammate assist! ${senderColor} tried to move ${teammateColor}'s token but it's not their turn!`);
@@ -1886,46 +2091,46 @@ io.on("connection", (socket) => {
       // --- LUDO ARROW MODE BACKEND SECURE LOGIC ---
       // This enforces the jump on the server side so hackers cannot bypass it
       const isArrowMode = room.gameMode === 'arrow' || room.gameMode === 'quick_arrow' || room.mode === 'arrow' || room.mode === 'quick_arrow';
-      
+
       if (isArrowMode && gameState && gameState.players && room.gameState && room.gameState.players && !alreadyOver) {
         const tailPositions = [4, 17, 30, 43];
         const gameLogic = require('./utils/gameLogic');
         let arrowJumpOccurred = false;
         let jumpingTokenColor = null;
-        
+
         for (const [color, player] of Object.entries(gameState.players)) {
           const oldPlayer = room.gameState.players[color];
           if (!oldPlayer || !oldPlayer.tokens || !player.tokens) continue;
-          
+
           for (let i = 0; i < player.tokens.length; i++) {
             const newToken = player.tokens[i];
             const oldToken = oldPlayer.tokens[i];
-            
+
             // If token moved forward and landed on an arrow tail
             if (newToken && oldToken && newToken.position > oldToken.position && tailPositions.includes(newToken.position)) {
               console.log(`⚡ [ARROW JUMP SECURE] Token ${i} of ${color} landed on tail ${newToken.position} in room ${roomCode}! Applying secure jump...`);
-              
+
               // 1. Move to next box (+1)
               newToken.position += 1;
               if (newToken.stepsFromStart !== undefined) {
                 newToken.stepsFromStart += 1;
               }
-              
+
               arrowJumpOccurred = true;
               jumpingTokenColor = color;
-              
+
               // 2. Check for kill at the new position
               const killResult = gameLogic.checkForKill(newToken.position, gameState.players, color, room.isTeamMode || false);
-              
+
               if (killResult) {
                 console.log(`⚔️ [ARROW JUMP KILL] ${color} killed ${killResult.color}'s token ${killResult.tokenIndex} at position ${newToken.position}!`);
-                
+
                 // Send victim home
                 const victim = gameState.players[killResult.color];
                 if (victim && victim.tokens && victim.tokens[killResult.tokenIndex]) {
                   victim.tokens[killResult.tokenIndex] = gameLogic.sendTokenHome(victim.tokens[killResult.tokenIndex]);
                 }
-                
+
                 // Update kills
                 player.hasKilled = true;
                 if (!gameState.kills) gameState.kills = 0;
@@ -1934,7 +2139,7 @@ io.on("connection", (socket) => {
             }
           }
         }
-        
+
         // 3. Grant new turn if jump occurred
         if (arrowJumpOccurred) {
           // Force current player to stay the same to grant a bonus turn
@@ -1954,7 +2159,7 @@ io.on("connection", (socket) => {
         if (isLudo) {
           const teamAColors = ['RED', 'YELLOW'];
           const teamBColors = ['GREEN', 'BLUE'];
-          
+
           let teamAWon = false;
           let teamBWon = false;
 
@@ -1962,9 +2167,9 @@ io.on("connection", (socket) => {
           const verifyPlayerWin = (color) => {
             const player = gameState.players[color];
             if (!player || !player.tokens) return false;
-            
+
             const finishedCount = player.tokens.filter(t => t.state === 'finished' || t.state === 'HOME').length;
-            
+
             if (room.gameMode === 'quick_arrow') {
               // Quick arrow mode requires at least 1 kill AND 1 token finished
               return player.hasKilled && finishedCount >= 1;
@@ -2010,7 +2215,7 @@ io.on("connection", (socket) => {
       // Mark room as game_over and schedule cleanup when a winner is set
       if (gameState?.winner || gameState?.status === "game_over") {
         room.status = "game_over";
-        
+
         // --- SECURE REWARD PROCESSING FOR AIR HOCKEY & SNAKE ---
         // Since Air Hockey and Snake are physics-heavy and client-authoritative for game over,
         // we process rewards here when the client first reports a winner.
@@ -2018,18 +2223,18 @@ io.on("connection", (socket) => {
           try {
             const RewardServiceServer = require('./rewardServiceServer');
             const winnerKey = gameState.winner; // "player1", "player2", or "draw"
-            
+
             // Map room mode to GameType string for rewards
             let gameTypeStr = 'UNKNOWN';
             if (room.mode === 'airhockey') gameTypeStr = 'AIR_HOCKEY';
             else if (room.mode === 'snake_vs_snake' || room.gameMode === 'snake_vs_snake') gameTypeStr = 'SNAKE';
-            
+
             if (gameTypeStr !== 'UNKNOWN' && gameState.players) {
               console.log(`🎁 [SERVER REWARDS] Processing secure rewards for ${gameTypeStr} room ${roomCode}`);
-              
+
               for (const [role, uid] of Object.entries(gameState.players)) {
                 if (!uid || uid.startsWith('bot_')) continue;
-                
+
                 if (winnerKey === 'draw') {
                   RewardServiceServer.awardGameDraw(uid, gameTypeStr, room.betAmount).catch(e => console.error(e));
                 } else if (role === winnerKey) {
@@ -2048,7 +2253,7 @@ io.on("connection", (socket) => {
             console.error('[SERVER REWARDS] Error processing rewards for physics game:', error);
           }
         }
-        
+
         scheduleRoomDelete(roomCode, 60000); // keep room 60 s for rematch
       }
 
@@ -2096,10 +2301,10 @@ io.on("connection", (socket) => {
     try {
       const diceValue = Math.floor(Math.random() * 6) + 1;
       const { getAIMove } = require('./utils/aiPlayer');
-      
+
       const allPlayers = gameState.players;
       let tokenIndex = null;
-      
+
       if (allPlayers && allPlayers[targetPlayerForAI]) {
         tokenIndex = getAIMove(
           allPlayers[targetPlayerForAI].tokens,
@@ -2121,7 +2326,7 @@ io.on("connection", (socket) => {
           timestamp: Date.now()
         };
       }
-      
+
       if (callback) callback({ success: true, diceValue, tokenIndex });
     } catch (err) {
       console.error('Error generating AI move on server:', err);
@@ -2432,28 +2637,28 @@ io.on("connection", (socket) => {
 
       // Smart color assignment for TeamUp mode
       let assignedColor = null;
-      
+
       if (room.isTeam) {
         // TeamUp mode: Prioritize keeping real players together
         const existingPlayers = Object.values(room.players);
         const realPlayers = existingPlayers.filter(p => !p.isBot);
         const botPlayers = existingPlayers.filter(p => p.isBot);
-        
+
         // Team A: RED + YELLOW, Team B: BLUE + GREEN
         const teamAColors = ['RED', 'YELLOW'];
         const teamBColors = ['BLUE', 'GREEN'];
-        
+
         // Find which colors are used by real players
         const realPlayerColors = realPlayers.map(p => p.color).filter(Boolean);
-        
+
         // Determine which team has real players
         const teamAHasRealPlayer = realPlayerColors.some(c => teamAColors.includes(c));
         const teamBHasRealPlayer = realPlayerColors.some(c => teamBColors.includes(c));
-        
+
         // Get available colors
         const usedColors = existingPlayers.map(p => p.color).filter(Boolean);
         const availableColors = ['RED', 'GREEN', 'YELLOW', 'BLUE'].filter(c => !usedColors.includes(c));
-        
+
         if (availableColors.length > 0) {
           if (teamAHasRealPlayer && !teamBHasRealPlayer) {
             // Real players in Team A, put bots in Team B
