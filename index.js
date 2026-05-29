@@ -936,7 +936,7 @@ app.post('/api/coins/transaction', strictLimiter, authenticateFinancialRequest, 
 // ==========================================
 
 // GET /api/friends/list
-app.get('/api/friends/list', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+app.get('/api/friends/list', limiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const userId = req.userId;
     const db = admin.firestore();
@@ -971,7 +971,7 @@ app.get('/api/friends/list', strictLimiter, authenticateFinancialRequest, async 
 });
 
 // GET /api/friends/requests/pending
-app.get('/api/friends/requests/pending', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+app.get('/api/friends/requests/pending', limiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const userId = req.userId;
     const db = admin.firestore();
@@ -1001,7 +1001,7 @@ app.get('/api/friends/requests/pending', strictLimiter, authenticateFinancialReq
 });
 
 // GET /api/friends/search
-app.get('/api/friends/search', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+app.get('/api/friends/search', limiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const userId = req.userId;
     const db = admin.firestore();
@@ -1035,7 +1035,7 @@ app.get('/api/friends/search', strictLimiter, authenticateFinancialRequest, asyn
 });
 
 // GET /api/friends/status/:friendId
-app.get('/api/friends/status/:friendId', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+app.get('/api/friends/status/:friendId', limiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const fromUserId = req.userId;
     const toUserId = req.params.friendId;
@@ -1364,6 +1364,13 @@ const clubChatServer = new ClubChatServer(io);
 clubChatServer.initialize();
 
 console.log("✅ Club Chat Server initialized with real-time messaging");
+
+// Initialize Friend Chat Server
+const FriendChatServer = require("./friendChatServer");
+const friendChatServer = new FriendChatServer(io, admin);
+friendChatServer.initialize();
+
+console.log("✅ Friend Chat Server initialized with highly secure 1-on-1 messaging");
 
 // Initialize Leaderboard Server
 const leaderboardServer = new LeaderboardServer(io);
