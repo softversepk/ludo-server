@@ -305,7 +305,7 @@ app.get('/stats', strictLimiter, (req, res) => {
 
 // SECURE FINANCIAL VALIDATION ENDPOINTS
 // Authentication middleware for financial operations
-function authenticateFinancialRequest(req, res, next) {
+async function authenticateFinancialRequest(req, res, next) {
   const authHeader = req.headers.authorization;
   const userId = req.headers['x-user-id'];
 
@@ -317,17 +317,31 @@ function authenticateFinancialRequest(req, res, next) {
     return res.status(400).json({ error: 'User ID required' });
   }
 
-  // In production, validate the JWT token here
-  // For now, we'll use a simple API key validation
   const token = authHeader.split(' ')[1];
   const validApiKey = process.env.API_KEY || 'development-key';
 
-  if (token !== validApiKey) {
-    return res.status(401).json({ error: 'Invalid authentication token' });
-  }
+  try {
+    // Check if it's a valid JWT from Firebase
+    if (token.length > 50 && admin.apps.length > 0) {
+      const decodedToken = await admin.auth().verifyIdToken(token);
+      
+      // Ensure the token belongs to the requesting user
+      if (decodedToken.uid !== userId) {
+        return res.status(403).json({ error: 'Token user mismatch' });
+      }
+    } else {
+      // Fallback for development/testing or if Firebase Admin isn't ready
+      if (token !== validApiKey) {
+        return res.status(401).json({ error: 'Invalid authentication token' });
+      }
+    }
 
-  req.userId = userId;
-  next();
+    req.userId = userId;
+    next();
+  } catch (error) {
+    console.error('Token verification failed:', error.message);
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
 };
 
 // Undo roll tracker for match-based pricing and limits
@@ -441,6 +455,101 @@ app.post('/api/game/undo-roll', strictLimiter, authenticateFinancialRequest, asy
   } catch (error) {
     console.error('❌ [UNDO-ROLL] Error:', error.message);
     res.status(200).json({ success: false, error: error.message || 'Failed to process undo' });
+  }
+});
+
+// SECURE HOME PAGE DATA ENDPOINT
+app.get('/api/home/data', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const db = admin.firestore();
+    
+    const [thumbnailsSnap, chestsSnap, userSnap] = await Promise.all([
+      db.collection('systemSettings').doc('gameThumbnails').get(),
+      db.collection('chest_boxes').where('isActive', '==', true).get(),
+      db.collection('users').doc(userId).get()
+    ]);
+    
+    const dynamicThumbnails = thumbnailsSnap.exists ? thumbnailsSnap.data() : {};
+    const userProfile = userSnap.exists ? userSnap.data() : {};
+    
+    const chestBoxes = [];
+    chestsSnap.forEach(doc => {
+      chestBoxes.push({ id: doc.id, ...doc.data() });
+    });
+    
+    const currentTime = Date.now();
+    const processedChests = chestBoxes.map(chest => {
+      const isDailyLogin = chest.requirementType === 'daily_login';
+      const isWins = chest.requirementType === 'wins';
+      const isTokenKills = chest.requirementType === 'token_kills';
+      
+      let isClaimed = false;
+      let showCountdown = false;
+      let progressText = '';
+      let showProgress = false;
+      let isReady = false;
+      
+      if (isDailyLogin) {
+        const nextTime = userProfile?.dailyLoginChests?.[chest.id];
+        if (nextTime && currentTime < nextTime) {
+          showCountdown = true;
+        } else {
+          isReady = true;
+        }
+      } else if (isWins) {
+        const target = parseFloat(chest.requirements) || 1;
+        const totalWins = userProfile?.gamesWon || 0;
+        const offset = userProfile?.chestWinOffsets?.[chest.id] || 0;
+        const currentWins = Math.max(0, totalWins - offset);
+        showProgress = true;
+        if (currentWins >= target) {
+          progressText = 'Ready!';
+          isReady = true;
+        } else {
+          progressText = `${currentWins}/${target} Wins`;
+        }
+      } else if (isTokenKills) {
+        const target = parseFloat(chest.requirements) || 1;
+        const totalKills = userProfile?.tokensKilled || 0;
+        const offset = userProfile?.chestKillOffsets?.[chest.id] || 0;
+        const currentKills = Math.max(0, totalKills - offset);
+        showProgress = true;
+        if (currentKills >= target) {
+          progressText = 'Ready!';
+          isReady = true;
+        } else {
+          progressText = `${currentKills}/${target} Kills`;
+        }
+      } else {
+        isClaimed = userProfile?.claimedChests?.includes(chest.id) || false;
+        if (!isClaimed) isReady = true;
+      }
+      
+      return {
+        ...chest,
+        state: {
+          isClaimed,
+          showCountdown,
+          showProgress,
+          progressText,
+          isReady,
+          nextTime: userProfile?.dailyLoginChests?.[chest.id] || null
+        }
+      };
+    });
+    
+    res.json({
+      success: true,
+      data: {
+        dynamicThumbnails,
+        chestBoxes: processedChests,
+        serverTime: currentTime
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching secure home data:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch secure home data' });
   }
 });
 
