@@ -77,6 +77,18 @@ const strictLimiter = rateLimit({
   }
 });
 
+// Dedicated rate limiter for high-frequency secure leaderboard read operations
+const leaderboardLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 300, // Allow up to 300 requests per 15 minutes to support real-time polling
+  message: {
+    error: 'Too many requests to leaderboard, please try again later.',
+    retryAfter: 15 * 60
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 // Body parsing with size limits
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
@@ -719,7 +731,7 @@ let playerLeaderboardCache = {
 };
 
 // 1. Fetch top 100 players from Firestore ordered by weeklyProfitCoins descending (Cached for 5s)
-app.get('/api/leaderboard', strictLimiter, async (req, res) => {
+app.get('/api/leaderboard', leaderboardLimiter, async (req, res) => {
   try {
     const now = Date.now();
     if (playerLeaderboardCache.data && (now - playerLeaderboardCache.timestamp) < 5000) {
@@ -761,7 +773,7 @@ app.get('/api/leaderboard', strictLimiter, async (req, res) => {
 });
 
 // 2. Fetch current user's current rank, eligible diamonds, and coins rewards
-app.get('/api/leaderboard/my-reward', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+app.get('/api/leaderboard/my-reward', leaderboardLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const userId = req.userId;
 
