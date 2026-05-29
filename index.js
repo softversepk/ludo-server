@@ -83,17 +83,13 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Production CORS configuration with security
 const corsOptions = {
-  origin: function (origin, callback) {
-    callback(null, true); // Allow all origins dynamically
-  },
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "x-user-id"],
+  origin: "*", // Allow all origins for easier connection during development and testing
+  methods: ["GET", "POST"],
   credentials: true,
   optionsSuccessStatus: 200 // For legacy browser support
 };
 
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // Handle preflight requests for all routes
 
 // Health check endpoint for monitoring
 app.get('/health', (req, res) => {
@@ -309,45 +305,29 @@ app.get('/stats', strictLimiter, (req, res) => {
 
 // SECURE FINANCIAL VALIDATION ENDPOINTS
 // Authentication middleware for financial operations
-async function authenticateFinancialRequest(req, res, next) {
+function authenticateFinancialRequest(req, res, next) {
   const authHeader = req.headers.authorization;
-  const headerUserId = req.headers['x-user-id']; // Used for fallback/compatibility, but token is source of truth
+  const userId = req.headers['x-user-id'];
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Authentication required' });
   }
 
+  if (!userId) {
+    return res.status(400).json({ error: 'User ID required' });
+  }
+
+  // In production, validate the JWT token here
+  // For now, we'll use a simple API key validation
   const token = authHeader.split(' ')[1];
+  const validApiKey = process.env.API_KEY || 'development-key';
 
-  try {
-    // Highly secure: Verify the Firebase Auth ID Token using Admin SDK
-    const decodedToken = await admin.auth().verifyIdToken(token);
-    
-    // Set the userId from the securely decoded token
-    req.userId = decodedToken.uid;
-
-    // Optional: Warn if the header userId doesn't match the token (helps catch spoofing attempts)
-    if (headerUserId && headerUserId !== req.userId) {
-      console.warn(`[SECURITY] User ID spoofing attempt detected. Header: ${headerUserId}, Token: ${req.userId}`);
-    }
-
-    next();
-  } catch (error) {
-    console.error('[SECURITY] Token verification failed:', error.message);
-    
-    // Fallback for development/testing if API_KEY is used (Remove in strict production)
-    const validApiKey = process.env.API_KEY || 'development-key';
-    if (token === validApiKey && process.env.NODE_ENV !== 'production') {
-      if (!headerUserId) {
-        return res.status(400).json({ error: 'User ID required for API key access' });
-      }
-      console.warn('[SECURITY] Using insecure API key fallback. NOT recommended for production.');
-      req.userId = headerUserId;
-      return next();
-    }
-
+  if (token !== validApiKey) {
     return res.status(401).json({ error: 'Invalid authentication token' });
   }
+
+  req.userId = userId;
+  next();
 };
 
 // Undo roll tracker for match-based pricing and limits
@@ -936,148 +916,6 @@ app.post('/api/coins/transaction', strictLimiter, authenticateFinancialRequest, 
 });
 
 // ==========================================
-// SECURE FRIEND READ API ENDPOINTS
-// ==========================================
-
-// GET /api/friends/list
-app.get('/api/friends/list', limiter, authenticateFinancialRequest, async (req, res) => {
-  try {
-    const userId = req.userId;
-    const db = admin.firestore();
-    const userDoc = await db.collection('users').doc(userId).get();
-    if (!userDoc.exists) return res.json({ success: true, friends: [] });
-    
-    const friendIds = userDoc.data().friends || [];
-    if (friendIds.length === 0) return res.json({ success: true, friends: [] });
-    
-    const friendsData = [];
-    const friendDocs = await Promise.all(friendIds.map(id => db.collection('users').doc(id).get()));
-    
-    for (const doc of friendDocs) {
-      if (doc.exists) {
-        const data = doc.data();
-        friendsData.push({
-          id: doc.id,
-          username: data.username || data.displayName || 'Unknown',
-          avatar: data.avatar || 'default',
-          level: data.level || 1,
-          lastActive: data.lastActive,
-          currentGame: data.currentGame,
-          settings: data.settings
-        });
-      }
-    }
-    
-    res.json({ success: true, friends: friendsData });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// GET /api/friends/requests/pending
-app.get('/api/friends/requests/pending', limiter, authenticateFinancialRequest, async (req, res) => {
-  try {
-    const userId = req.userId;
-    const db = admin.firestore();
-    const requestsQuery = await db.collection('friendRequests')
-      .where('toUserId', '==', userId)
-      .where('status', '==', 'pending')
-      .get();
-      
-    const requests = [];
-    for (const docSnap of requestsQuery.docs) {
-      const data = docSnap.data();
-      const senderDoc = await db.collection('users').doc(data.fromUserId).get();
-      const senderData = senderDoc.exists ? senderDoc.data() : {};
-      requests.push({
-        id: docSnap.id,
-        ...data,
-        senderName: senderData.username || senderData.displayName || 'Unknown',
-        senderAvatar: senderData.avatar || 'default',
-        senderLevel: senderData.level || 1,
-      });
-    }
-    
-    res.json({ success: true, requests });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// GET /api/friends/search
-app.get('/api/friends/search', limiter, authenticateFinancialRequest, async (req, res) => {
-  try {
-    const userId = req.userId;
-    const db = admin.firestore();
-    
-    const userDoc = await db.collection('users').doc(userId).get();
-    const currentFriends = userDoc.exists ? (userDoc.data().friends || []) : [];
-    
-    // Securely fetch a limited number of users to prevent memory overload
-    const usersQuery = await db.collection('users').limit(150).get();
-    
-    const users = [];
-    usersQuery.forEach(docSnap => {
-      if (docSnap.id !== userId && !currentFriends.includes(docSnap.id) && !docSnap.id.startsWith('bot_')) {
-        const data = docSnap.data();
-        if (!data.settings?.privateAccount) {
-          users.push({
-            id: docSnap.id,
-            name: data.username || data.displayName || 'Unknown',
-            avatar: data.avatar || 'default',
-            level: data.level || 1,
-            club: data.clubName || null,
-          });
-        }
-      }
-    });
-    
-    res.json({ success: true, users });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// GET /api/friends/status/:friendId
-app.get('/api/friends/status/:friendId', limiter, authenticateFinancialRequest, async (req, res) => {
-  try {
-    const fromUserId = req.userId;
-    const toUserId = req.params.friendId;
-    const db = admin.firestore();
-    
-    const userDoc = await db.collection('users').doc(fromUserId).get();
-    const friends = userDoc.exists ? (userDoc.data().friends || []) : [];
-    if (friends.includes(toUserId)) {
-      return res.json({ success: true, status: 'friends' });
-    }
-    
-    const sentQuery = await db.collection('friendRequests')
-      .where('fromUserId', '==', fromUserId)
-      .where('toUserId', '==', toUserId)
-      .where('status', '==', 'pending')
-      .get();
-      
-    if (!sentQuery.empty) {
-      return res.json({ success: true, status: 'pending_sent' });
-    }
-    
-    const receivedQuery = await db.collection('friendRequests')
-      .where('fromUserId', '==', toUserId)
-      .where('toUserId', '==', fromUserId)
-      .where('status', '==', 'pending')
-      .get();
-      
-    if (!receivedQuery.empty) {
-      return res.json({ success: true, status: { status: 'pending_received', requestId: receivedQuery.docs[0].id } });
-    }
-    
-    res.json({ success: true, status: 'none' });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// ==========================================
 // SECURE FRIEND REQUEST SYSTEM
 // ==========================================
 
@@ -1368,13 +1206,6 @@ const clubChatServer = new ClubChatServer(io);
 clubChatServer.initialize();
 
 console.log("✅ Club Chat Server initialized with real-time messaging");
-
-// Initialize Friend Chat Server
-const FriendChatServer = require("./friendChatServer");
-const friendChatServer = new FriendChatServer(io, admin);
-friendChatServer.initialize();
-
-console.log("✅ Friend Chat Server initialized with highly secure 1-on-1 messaging");
 
 // Initialize Leaderboard Server
 const leaderboardServer = new LeaderboardServer(io);
