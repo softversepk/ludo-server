@@ -483,6 +483,7 @@ app.get('/api/home/data', strictLimiter, authenticateFinancialRequest, async (re
       const isDailyLogin = chest.requirementType === 'daily_login';
       const isWins = chest.requirementType === 'wins';
       const isTokenKills = chest.requirementType === 'token_kills';
+      const isOneTime = !isDailyLogin && !isWins && !isTokenKills;
       
       let isClaimed = false;
       let showCountdown = false;
@@ -490,40 +491,62 @@ app.get('/api/home/data', strictLimiter, authenticateFinancialRequest, async (re
       let showProgress = false;
       let isReady = false;
       
+      const target = parseFloat(chest.requirements) || 1;
+      let currentProgress = 0;
+      let targetProgress = target;
+      const isTimerBased = isDailyLogin;
+      let timeRemaining = 0;
+      
       if (isDailyLogin) {
         const nextTime = userProfile?.dailyLoginChests?.[chest.id];
         if (nextTime && currentTime < nextTime) {
           showCountdown = true;
+          timeRemaining = nextTime - currentTime;
+          isReady = false;
         } else {
           isReady = true;
+          timeRemaining = 0;
         }
+        currentProgress = isReady ? target : Math.max(0, target - (timeRemaining / (24 * 60 * 60 * 1000)));
       } else if (isWins) {
-        const target = parseFloat(chest.requirements) || 1;
         const totalWins = userProfile?.gamesWon || 0;
         const offset = userProfile?.chestWinOffsets?.[chest.id] || 0;
         const currentWins = Math.max(0, totalWins - offset);
+        currentProgress = currentWins;
         showProgress = true;
         if (currentWins >= target) {
           progressText = 'Ready!';
           isReady = true;
         } else {
           progressText = `${currentWins}/${target} Wins`;
+          isReady = false;
         }
       } else if (isTokenKills) {
-        const target = parseFloat(chest.requirements) || 1;
         const totalKills = userProfile?.tokensKilled || 0;
         const offset = userProfile?.chestKillOffsets?.[chest.id] || 0;
         const currentKills = Math.max(0, totalKills - offset);
+        currentProgress = currentKills;
         showProgress = true;
         if (currentKills >= target) {
           progressText = 'Ready!';
           isReady = true;
         } else {
           progressText = `${currentKills}/${target} Kills`;
+          isReady = false;
         }
       } else {
         isClaimed = userProfile?.claimedChests?.includes(chest.id) || false;
+        targetProgress = 1;
+        currentProgress = isClaimed ? 1 : 0;
         if (!isClaimed) isReady = true;
+      }
+      
+      let progressPercent = 100;
+      if (isTimerBased) {
+        const targetMs = target * 24 * 60 * 60 * 1000;
+        progressPercent = isReady ? 100 : Math.max(0, 100 - (timeRemaining / targetMs) * 100);
+      } else {
+        progressPercent = Math.min(100, Math.max(0, (currentProgress / targetProgress) * 100));
       }
       
       return {
@@ -534,7 +557,12 @@ app.get('/api/home/data', strictLimiter, authenticateFinancialRequest, async (re
           showProgress,
           progressText,
           isReady,
-          nextTime: userProfile?.dailyLoginChests?.[chest.id] || null
+          nextTime: userProfile?.dailyLoginChests?.[chest.id] || null,
+          isTimerBased,
+          timeRemaining,
+          currentProgress,
+          targetProgress,
+          progressPercent
         }
       };
     });
