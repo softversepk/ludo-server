@@ -305,29 +305,45 @@ app.get('/stats', strictLimiter, (req, res) => {
 
 // SECURE FINANCIAL VALIDATION ENDPOINTS
 // Authentication middleware for financial operations
-function authenticateFinancialRequest(req, res, next) {
+async function authenticateFinancialRequest(req, res, next) {
   const authHeader = req.headers.authorization;
-  const userId = req.headers['x-user-id'];
+  const headerUserId = req.headers['x-user-id']; // Used for fallback/compatibility, but token is source of truth
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Authentication required' });
   }
 
-  if (!userId) {
-    return res.status(400).json({ error: 'User ID required' });
-  }
-
-  // In production, validate the JWT token here
-  // For now, we'll use a simple API key validation
   const token = authHeader.split(' ')[1];
-  const validApiKey = process.env.API_KEY || 'development-key';
 
-  if (token !== validApiKey) {
+  try {
+    // Highly secure: Verify the Firebase Auth ID Token using Admin SDK
+    const decodedToken = await admin.auth().verifyIdToken(token);
+    
+    // Set the userId from the securely decoded token
+    req.userId = decodedToken.uid;
+
+    // Optional: Warn if the header userId doesn't match the token (helps catch spoofing attempts)
+    if (headerUserId && headerUserId !== req.userId) {
+      console.warn(`[SECURITY] User ID spoofing attempt detected. Header: ${headerUserId}, Token: ${req.userId}`);
+    }
+
+    next();
+  } catch (error) {
+    console.error('[SECURITY] Token verification failed:', error.message);
+    
+    // Fallback for development/testing if API_KEY is used (Remove in strict production)
+    const validApiKey = process.env.API_KEY || 'development-key';
+    if (token === validApiKey && process.env.NODE_ENV !== 'production') {
+      if (!headerUserId) {
+        return res.status(400).json({ error: 'User ID required for API key access' });
+      }
+      console.warn('[SECURITY] Using insecure API key fallback. NOT recommended for production.');
+      req.userId = headerUserId;
+      return next();
+    }
+
     return res.status(401).json({ error: 'Invalid authentication token' });
   }
-
-  req.userId = userId;
-  next();
 };
 
 // Undo roll tracker for match-based pricing and limits
