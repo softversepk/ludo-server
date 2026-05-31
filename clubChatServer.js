@@ -4,8 +4,9 @@
  */
 
 class ClubChatServer {
-  constructor(io) {
+  constructor(io, admin) {
     this.io = io;
+    this.admin = admin;
     this.clubRooms = new Map(); // clubId -> { members: Set, messages: [] }
     this.userSockets = new Map(); // userId -> { socketId, clubId, username }
   }
@@ -53,9 +54,32 @@ class ClubChatServer {
   /**
    * Handle user joining club chat
    */
-  handleJoinClub(socket, { clubId, userId, username, avatar, role }) {
+  async handleJoinClub(socket, { clubId, userId, username, avatar, role, token }) {
     try {
       console.log(`🎮 [CLUB JOIN] ${username} joining club ${clubId}`);
+
+      // Security verification
+      if (!token) {
+        throw new Error('Authentication token required');
+      }
+
+      if (this.admin) {
+        try {
+          const decodedToken = await this.admin.auth().verifyIdToken(token);
+          if (decodedToken.uid !== userId) {
+            console.warn(`🔒 [CLUB SEC] UID mismatch: token=${decodedToken.uid}, req=${userId}`);
+            throw new Error('Unauthorized user ID mismatch');
+          }
+          // Mark socket as authenticated
+          socket.userId = userId;
+        } catch (authError) {
+          console.error('🔒 [CLUB SEC] Token verification failed:', authError.message);
+          throw new Error('Invalid or expired authentication token');
+        }
+      } else {
+        // Fallback for local testing if admin not initialized
+        socket.userId = userId;
+      }
 
       // Get or create club room
       if (!this.clubRooms.has(clubId)) {
@@ -124,6 +148,11 @@ class ClubChatServer {
    */
   handleLeaveClub(socket, { clubId, userId }) {
     try {
+      if (socket.userId && socket.userId !== userId) {
+        console.warn(`🔒 [CLUB SEC] Leave attempt by wrong user. socket=${socket.userId}, req=${userId}`);
+        return;
+      }
+
       console.log(`👋 [CLUB LEAVE] User ${userId} leaving club ${clubId}`);
 
       const clubRoom = this.clubRooms.get(clubId);
@@ -173,6 +202,12 @@ class ClubChatServer {
    */
   handleSendMessage(socket, { clubId, userId, username, avatar, message, messageType = 'text' }) {
     try {
+      if (socket.userId && socket.userId !== userId) {
+        console.warn(`🔒 [CLUB SEC] Send message attempt by wrong user. socket=${socket.userId}, req=${userId}`);
+        socket.emit('club:send_error', { error: 'Unauthorized user' });
+        return;
+      }
+
       const clubRoom = this.clubRooms.get(clubId);
       if (!clubRoom) {
         socket.emit('club:send_error', { error: 'Club room not found' });
@@ -219,6 +254,8 @@ class ClubChatServer {
    */
   handleTyping(socket, { clubId, userId, username, isTyping }) {
     try {
+      if (socket.userId && socket.userId !== userId) return;
+
       const clubRoom = this.clubRooms.get(clubId);
       if (!clubRoom || !clubRoom.members.has(userId)) return;
 
@@ -239,6 +276,11 @@ class ClubChatServer {
    */
   handleRequestHistory(socket, { clubId, userId, limit = 50, before = null }) {
     try {
+      if (socket.userId && socket.userId !== userId) {
+        socket.emit('club:history_error', { error: 'Unauthorized user' });
+        return;
+      }
+
       const clubRoom = this.clubRooms.get(clubId);
       if (!clubRoom) {
         socket.emit('club:history_error', { error: 'Club room not found' });
@@ -276,6 +318,11 @@ class ClubChatServer {
    */
   handleDeleteMessage(socket, { clubId, userId, messageId, role }) {
     try {
+      if (socket.userId && socket.userId !== userId) {
+        socket.emit('club:delete_error', { error: 'Unauthorized user' });
+        return;
+      }
+
       const clubRoom = this.clubRooms.get(clubId);
       if (!clubRoom) return;
 
@@ -309,6 +356,8 @@ class ClubChatServer {
    */
   handleHeartbeat(socket, { clubId, userId }) {
     try {
+      if (socket.userId && socket.userId !== userId) return;
+
       const clubRoom = this.clubRooms.get(clubId);
       if (!clubRoom) return;
 
@@ -327,6 +376,8 @@ class ClubChatServer {
    */
   handleJoinVoiceSlot(socket, { clubId, userId, username, avatar, slotIndex }) {
     try {
+      if (socket.userId && socket.userId !== userId) return;
+
       const clubRoom = this.clubRooms.get(clubId);
       if (!clubRoom) return;
 
@@ -356,6 +407,8 @@ class ClubChatServer {
    */
   handleLeaveVoiceSlot(socket, { clubId, userId }) {
     try {
+      if (socket.userId && socket.userId !== userId) return;
+
       const clubRoom = this.clubRooms.get(clubId);
       if (!clubRoom) return;
 
