@@ -90,6 +90,41 @@ class RewardServiceServer {
         console.error('XP Error:', err);
       }
       
+      // SECURE LEADERBOARD UPDATE
+      try {
+        if (global.leaderboardServer) {
+          const finalUserDoc = await userRef.get();
+          if (finalUserDoc.exists) {
+            const finalData = finalUserDoc.data();
+            global.leaderboardServer.updatePlayerInternal({
+              userId,
+              username: finalData.username || 'Player',
+              avatar: finalData.avatar || 'default',
+              score: finalData.totalCoinsEarned || finalData.totalScore || finalData.xp || finalData.coins || 0,
+              wins: finalData.gamesWon || 0,
+              gamesPlayed: finalData.gamesPlayed || 0,
+              clubId: finalData.clubId || null
+            });
+          }
+          if (clubId) {
+            const finalClubDoc = await db.collection('clubs').doc(clubId).get();
+            if (finalClubDoc.exists) {
+              const finalClubData = finalClubDoc.data();
+              global.leaderboardServer.updateClubInternal({
+                clubId: clubId,
+                clubName: finalClubData.name || 'Club',
+                badge: finalClubData.badge || 'default',
+                points: finalClubData.totalPoints || finalClubData.weeklyPoints || finalClubData.totalWins || 0,
+                memberCount: finalClubData.memberCount || finalClubData.members?.length || 0,
+                gamesPlayed: finalClubData.totalGames || 0
+              });
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Leaderboard Update Error:', err);
+      }
+      
       return {
         success: true,
         coins: coinReward,
@@ -120,6 +155,41 @@ class RewardServiceServer {
         console.error('XP Error:', err);
       }
       
+      // SECURE LEADERBOARD UPDATE
+      try {
+        if (global.leaderboardServer) {
+          const finalUserDoc = await userRef.get();
+          if (finalUserDoc.exists) {
+            const finalData = finalUserDoc.data();
+            global.leaderboardServer.updatePlayerInternal({
+              userId,
+              username: finalData.username || 'Player',
+              avatar: finalData.avatar || 'default',
+              score: finalData.totalCoinsEarned || finalData.totalScore || finalData.xp || finalData.coins || 0,
+              wins: finalData.gamesWon || 0,
+              gamesPlayed: finalData.gamesPlayed || 0,
+              clubId: finalData.clubId || null
+            });
+            if (finalData.clubId) {
+              const finalClubDoc = await db.collection('clubs').doc(finalData.clubId).get();
+              if (finalClubDoc.exists) {
+                const finalClubData = finalClubDoc.data();
+                global.leaderboardServer.updateClubInternal({
+                  clubId: finalData.clubId,
+                  clubName: finalClubData.name || 'Club',
+                  badge: finalClubData.badge || 'default',
+                  points: finalClubData.totalPoints || finalClubData.weeklyPoints || finalClubData.totalWins || 0,
+                  memberCount: finalClubData.memberCount || finalClubData.members?.length || 0,
+                  gamesPlayed: finalClubData.totalGames || 0
+                });
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Leaderboard Update Error:', err);
+      }
+      
       return { success: true };
     } catch (error) {
       console.error('Error awarding loss:', error);
@@ -144,6 +214,41 @@ class RewardServiceServer {
         await processUserXP(userId, 'match_join');
       } catch (err) {
         console.error('XP Error:', err);
+      }
+
+      // SECURE LEADERBOARD UPDATE
+      try {
+        if (global.leaderboardServer) {
+          const finalUserDoc = await userRef.get();
+          if (finalUserDoc.exists) {
+            const finalData = finalUserDoc.data();
+            global.leaderboardServer.updatePlayerInternal({
+              userId,
+              username: finalData.username || 'Player',
+              avatar: finalData.avatar || 'default',
+              score: finalData.totalCoinsEarned || finalData.totalScore || finalData.xp || finalData.coins || 0,
+              wins: finalData.gamesWon || 0,
+              gamesPlayed: finalData.gamesPlayed || 0,
+              clubId: finalData.clubId || null
+            });
+            if (finalData.clubId) {
+              const finalClubDoc = await db.collection('clubs').doc(finalData.clubId).get();
+              if (finalClubDoc.exists) {
+                const finalClubData = finalClubDoc.data();
+                global.leaderboardServer.updateClubInternal({
+                  clubId: finalData.clubId,
+                  clubName: finalClubData.name || 'Club',
+                  badge: finalClubData.badge || 'default',
+                  points: finalClubData.totalPoints || finalClubData.weeklyPoints || finalClubData.totalWins || 0,
+                  memberCount: finalClubData.memberCount || finalClubData.members?.length || 0,
+                  gamesPlayed: finalClubData.totalGames || 0
+                });
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Leaderboard Update Error:', err);
       }
       
       return { success: true };
