@@ -652,6 +652,162 @@ app.post('/api/skins/select', strictLimiter, authenticateFinancialRequest, async
   }
 });
 
+// SECURE REWARDS ENDPOINTS
+app.post('/api/rewards/claim-daily', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { userId } = req.body;
+    if (!userId || userId !== req.userId) {
+      return res.status(403).json({ error: 'Unauthorized user' });
+    }
+
+    const db = admin.firestore();
+    
+    // Get reward settings
+    const settingsDoc = await db.collection('settings').doc('rewards').get();
+    let dailyRewards = [
+      { day: 1, coins: 100, gems: 5, special: false },
+      { day: 2, coins: 150, gems: 5, special: false },
+      { day: 3, coins: 200, gems: 10, special: false },
+      { day: 4, coins: 300, gems: 10, special: false },
+      { day: 5, coins: 400, gems: 15, special: false },
+      { day: 6, coins: 500, gems: 20, special: false },
+      { day: 7, coins: 1000, gems: 50, special: true },
+    ];
+    if (settingsDoc.exists && settingsDoc.data().dailyRewards) {
+      dailyRewards = settingsDoc.data().dailyRewards;
+    }
+
+    const todayStr = new Date().toDateString();
+
+    await db.runTransaction(async (transaction) => {
+      const userRef = db.collection('users').doc(userId);
+      const userDoc = await transaction.get(userRef);
+      if (!userDoc.exists) throw new Error('User not found');
+
+      const userData = userDoc.data();
+      const lastRewardDate = userData.lastRewardClaimDate;
+      
+      if (lastRewardDate === todayStr) {
+        throw new Error('Reward already claimed today');
+      }
+
+      const rawStreak = userData.loginStreak || 0;
+      const rewardIdx = Math.max(0, rawStreak - 1) % 7;
+      const reward = dailyRewards[rewardIdx];
+
+      const updates = {
+        lastRewardClaimDate: todayStr,
+        coins: admin.firestore.FieldValue.increment(reward.coins),
+        totalCoinsEarned: admin.firestore.FieldValue.increment(reward.coins),
+        weeklyCoins: admin.firestore.FieldValue.increment(reward.coins),
+        gems: admin.firestore.FieldValue.increment(reward.gems)
+      };
+
+      transaction.update(userRef, updates);
+
+      // Log diamond transaction
+      if (reward.gems > 0) {
+        const txRef = db.collection('diamondTransactions').doc();
+        transaction.set(txRef, {
+          userId,
+          amount: reward.gems,
+          type: 'daily_bonus',
+          description: `Day ${reward.day} login reward`,
+          timestamp: admin.firestore.FieldValue.serverTimestamp(),
+          balanceAfter: (userData.gems || 0) + reward.gems
+        });
+      }
+    });
+
+    res.status(200).json({ success: true, message: 'Daily reward claimed' });
+  } catch (error) {
+    console.error('Error claiming daily reward:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/rewards/claim-achievement', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { userId, achievementId } = req.body;
+    if (!userId || !achievementId || userId !== req.userId) {
+      return res.status(403).json({ error: 'Unauthorized user or missing achievement ID' });
+    }
+
+    const db = admin.firestore();
+
+    // Get achievement settings
+    const settingsDoc = await db.collection('settings').doc('rewards').get();
+    let achievementsDef = [
+      { id: 'first_win', title: 'First Win', target: 1, reward: 500, gemReward: 10 },
+      { id: 'winning_streak', title: 'Winning Streak', target: 5, reward: 1000, gemReward: 25 },
+      { id: 'coin_collector', title: 'Coin Collector', target: 10000, reward: 2000, gemReward: 50 },
+      { id: 'social_player', title: 'Social Player', target: 1, reward: 500, gemReward: 10 },
+    ];
+    if (settingsDoc.exists && settingsDoc.data().achievements) {
+      achievementsDef = settingsDoc.data().achievements;
+    }
+
+    const achievementDef = achievementsDef.find(a => a.id === achievementId);
+    if (!achievementDef) {
+      return res.status(404).json({ error: 'Achievement not found' });
+    }
+
+    await db.runTransaction(async (transaction) => {
+      const userRef = db.collection('users').doc(userId);
+      const userDoc = await transaction.get(userRef);
+      if (!userDoc.exists) throw new Error('User not found');
+
+      const userData = userDoc.data();
+      const claimedAchievements = userData.claimedAchievements || [];
+
+      if (claimedAchievements.includes(achievementId)) {
+        throw new Error('Achievement already claimed');
+      }
+
+      // Verify progress
+      let progress = 0;
+      switch (achievementId) {
+        case 'first_win': progress = userData.gamesWon || 0; break;
+        case 'winning_streak': progress = userData.winStreak || 0; break;
+        case 'coin_collector': progress = userData.totalCoinsEarned || 0; break;
+        case 'social_player': progress = userData.clubId ? 1 : 0; break;
+      }
+
+      if (progress < achievementDef.target) {
+        throw new Error('Achievement requirements not met');
+      }
+
+      const updates = {
+        claimedAchievements: admin.firestore.FieldValue.arrayUnion(achievementId),
+        coins: admin.firestore.FieldValue.increment(achievementDef.reward),
+        totalCoinsEarned: admin.firestore.FieldValue.increment(achievementDef.reward),
+        weeklyCoins: admin.firestore.FieldValue.increment(achievementDef.reward),
+        gems: admin.firestore.FieldValue.increment(achievementDef.gemReward)
+      };
+
+      transaction.update(userRef, updates);
+
+      // Log diamond transaction
+      if (achievementDef.gemReward > 0) {
+        const txRef = db.collection('diamondTransactions').doc();
+        transaction.set(txRef, {
+          userId,
+          amount: achievementDef.gemReward,
+          type: 'achievement',
+          description: `Achievement: ${achievementDef.title}`,
+          timestamp: admin.firestore.FieldValue.serverTimestamp(),
+          balanceAfter: (userData.gems || 0) + achievementDef.gemReward
+        });
+      }
+    });
+
+    res.status(200).json({ success: true, message: 'Achievement claimed' });
+  } catch (error) {
+    console.error('Error claiming achievement:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
 // Update Game Stats securely on the backend
 app.post('/api/game/update-stats', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
