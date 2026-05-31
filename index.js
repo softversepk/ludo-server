@@ -575,6 +575,83 @@ app.post('/api/chest/claim', strictLimiter, authenticateFinancialRequest, async 
   }
 });
 
+// SECURE SKIN SELECTION ENDPOINT
+app.post('/api/skins/select', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { userId, gameName, skinId, type } = req.body;
+
+    if (!userId || !gameName || !skinId) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    if (userId !== req.userId) {
+      return res.status(403).json({ error: 'Unauthorized user' });
+    }
+
+    if (!admin.apps.length) {
+      return res.status(503).json({ error: 'Firebase Admin not initialized' });
+    }
+
+    const db = admin.firestore();
+    let collectionName = '';
+    let updateField = '';
+
+    if (gameName === 'Tic Tac Toe') {
+      collectionName = 'tictactoe_tokens';
+      updateField = 'selectedTicTacToeToken';
+    } else if (gameName === 'Chess') {
+      collectionName = 'chess_tokens';
+      updateField = 'selectedChessToken';
+    } else if (gameName === 'Snake') {
+      if (type === 'tables') {
+        collectionName = 'snake_tables';
+        updateField = 'selectedSnakeTable';
+      } else {
+        collectionName = 'snake_tokens';
+        updateField = 'selectedSnakeToken';
+      }
+    } else if (gameName === 'Air Hockey') {
+      if (type === 'tables') {
+        collectionName = 'airhockey_tables';
+        updateField = 'selectedAirHockeyTable';
+      } else {
+        collectionName = 'airhockey_tokens';
+        updateField = 'selectedAirHockey';
+      }
+    } else if (gameName === 'Ludo') {
+      if (type === 'dices') {
+        collectionName = 'ludo_dices';
+        updateField = 'selectedDice';
+      } else {
+        collectionName = 'ludo_tokens';
+        updateField = 'selectedToken';
+      }
+    } else {
+      return res.status(400).json({ error: 'Invalid game name' });
+    }
+
+    // Verify skin exists (unless it's 'classic')
+    if (skinId !== 'classic') {
+      const skinRef = db.collection(collectionName).doc(skinId);
+      const skinDoc = await skinRef.get();
+      if (!skinDoc.exists) {
+        return res.status(404).json({ error: 'Skin not found' });
+      }
+    }
+
+    // Update user profile securely
+    const userRef = db.collection('users').doc(userId);
+    await userRef.update({
+      [updateField]: skinId
+    });
+
+    res.status(200).json({ success: true, message: 'Skin selected successfully' });
+  } catch (error) {
+    console.error('Error selecting skin:', error.message);
+    res.status(500).json({ success: false, error: error.message || 'Failed to select skin' });
+  }
+});
+
 // Update Game Stats securely on the backend
 app.post('/api/game/update-stats', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
