@@ -28,12 +28,6 @@ class LeaderboardServer {
       // Request current leaderboard
       socket.on('leaderboard:request', (data) => this.handleRequest(socket, data));
 
-      // Update player score (from game server)
-      socket.on('leaderboard:update_player', (data) => this.handleUpdatePlayer(socket, data));
-
-      // Update club points (from game server)
-      socket.on('leaderboard:update_club', (data) => this.handleUpdateClub(socket, data));
-
       // Request player rank
       socket.on('leaderboard:get_player_rank', (data) => this.handleGetPlayerRank(socket, data));
 
@@ -133,11 +127,11 @@ class LeaderboardServer {
   }
 
   /**
-   * Handle player score update
+   * Internal method to handle player score update (Secure, called from backend)
    */
-  handleUpdatePlayer(socket, { userId, username, avatar, score, wins, gamesPlayed, clubId }) {
+  updatePlayerInternal({ userId, username, avatar, score, wins, gamesPlayed, clubId }) {
     try {
-      console.log(`🎮 [PLAYER UPDATE] ${username}: Score ${score}, Wins ${wins}`);
+      console.log(`🎮 [PLAYER UPDATE SECURE] ${username}: Score ${score}, Wins ${wins}`);
 
       // Get current player data
       const currentData = this.playerLeaderboard.get(userId) || {};
@@ -175,28 +169,20 @@ class LeaderboardServer {
         });
       }
 
-      // Send acknowledgment
-      socket.emit('leaderboard:player_updated', {
-        userId,
-        rank: newRank,
-        score,
-        wins,
-        timestamp: Date.now()
-      });
-
-      console.log(`✅ [PLAYER UPDATE] ${username} now rank #${newRank}`);
+      console.log(`✅ [PLAYER UPDATE SECURE] ${username} now rank #${newRank}`);
+      return { success: true, rank: newRank };
     } catch (error) {
       console.error('❌ [PLAYER UPDATE ERROR]', error);
-      socket.emit('leaderboard:update_error', { error: error.message });
+      return { success: false, error: error.message };
     }
   }
 
   /**
-   * Handle club points update
+   * Internal method to handle club points update (Secure, called from backend)
    */
-  handleUpdateClub(socket, { clubId, clubName, badge, points, memberCount, gamesPlayed }) {
+  updateClubInternal({ clubId, clubName, badge, points, memberCount, gamesPlayed }) {
     try {
-      console.log(`🏆 [CLUB UPDATE] ${clubName}: Points ${points}`);
+      console.log(`🏆 [CLUB UPDATE SECURE] ${clubName}: Points ${points}`);
 
       // Get current club data
       const currentData = this.clubLeaderboard.get(clubId) || {};
@@ -232,18 +218,11 @@ class LeaderboardServer {
         });
       }
 
-      // Send acknowledgment
-      socket.emit('leaderboard:club_updated', {
-        clubId,
-        rank: newRank,
-        points,
-        timestamp: Date.now()
-      });
-
-      console.log(`✅ [CLUB UPDATE] ${clubName} now rank #${newRank}`);
+      console.log(`✅ [CLUB UPDATE SECURE] ${clubName} now rank #${newRank}`);
+      return { success: true, rank: newRank };
     } catch (error) {
       console.error('❌ [CLUB UPDATE ERROR]', error);
-      socket.emit('leaderboard:update_error', { error: error.message });
+      return { success: false, error: error.message };
     }
   }
 
