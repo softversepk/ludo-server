@@ -164,70 +164,241 @@ app.post('/api/economy/update', strictLimiter, authenticateFinancialRequest, asy
   }
 });
 
-// GIFT SENDING ENDPOINT
-app.post('/api/gifts/send', strictLimiter, async (req, res) => {
+
+// SHOP WATCH VIDEO ENDPOINT
+app.post('/api/shop/watch-video', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
-    const { senderId, recipientId, giftId, clubId, cost } = req.body;
+    const userId = req.userId;
+    const db = admin.firestore();
     
-    if (!senderId || !giftId || !clubId || !cost) {
-      return res.status(400).json({ error: 'Missing required fields' });
+    // Get shop settings
+    const settingsDoc = await db.collection('settings').doc('shop').get();
+    const settings = settingsDoc.exists ? settingsDoc.data() : {};
+    const maxVideosPerDay = settings.maxVideosPerDay !== undefined ? settings.maxVideosPerDay : 5;
+    const videoRewardCoins = settings.videoRewardCoins !== undefined ? settings.videoRewardCoins : 50;
+
+    const todayStr = new Date().toDateString();
+
+    let newCount = 0;
+    let coinsToAdd = videoRewardCoins;
+
+    await db.runTransaction(async (transaction) => {
+      const userRef = db.collection('users').doc(userId);
+      const userDoc = await transaction.get(userRef);
+      if (!userDoc.exists) throw new Error('User not found');
+
+      const userData = userDoc.data();
+      const lastWatchVideoDate = userData.lastWatchVideoDate;
+      const currentWatchCount = userData.watchVideoCount || 0;
+
+      // Reset count if it's a new day
+      const watchCount = (lastWatchVideoDate === todayStr) ? currentWatchCount : 0;
+
+      if (watchCount >= maxVideosPerDay) {
+        throw new Error('Daily video limit reached');
+      }
+
+      newCount = watchCount + 1;
+
+      transaction.update(userRef, {
+        coins: admin.firestore.FieldValue.increment(videoRewardCoins),
+        totalCoinsEarned: admin.firestore.FieldValue.increment(videoRewardCoins),
+        weeklyCoins: admin.firestore.FieldValue.increment(videoRewardCoins),
+        watchVideoCount: newCount,
+        lastWatchVideoDate: todayStr
+      });
+    });
+
+    res.status(200).json({ success: true, message: 'Video reward claimed', coinsAdded: coinsToAdd, videosLeft: maxVideosPerDay - newCount });
+  } catch (error) {
+    console.error('Error claiming video reward:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+// SHOP RATE US ENDPOINT
+app.post('/api/shop/rate-us', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const db = admin.firestore();
+    
+    // Get shop settings
+    const settingsDoc = await db.collection('settings').doc('shop').get();
+    const settings = settingsDoc.exists ? settingsDoc.data() : {};
+    const rateRewardCoins = settings.rateRewardCoins !== undefined ? settings.rateRewardCoins : 1000;
+
+    let coinsToAdd = rateRewardCoins;
+
+    await db.runTransaction(async (transaction) => {
+      const userRef = db.collection('users').doc(userId);
+      const userDoc = await transaction.get(userRef);
+      if (!userDoc.exists) throw new Error('User not found');
+
+      const userData = userDoc.data();
+      if (userData.hasRatedApp) {
+        throw new Error('Already claimed rating reward');
+      }
+
+      transaction.update(userRef, {
+        coins: admin.firestore.FieldValue.increment(rateRewardCoins),
+        totalCoinsEarned: admin.firestore.FieldValue.increment(rateRewardCoins),
+        weeklyCoins: admin.firestore.FieldValue.increment(rateRewardCoins),
+        hasRatedApp: true
+      });
+    });
+
+    res.status(200).json({ success: true, message: 'Rating reward claimed', coinsAdded: coinsToAdd });
+  } catch (error) {
+    console.error('Error claiming rating reward:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+// SHOP EXCHANGE GEMS FOR COINS ENDPOINT
+app.post('/api/shop/exchange', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { gemAmount } = req.body;
+    const userId = req.userId;
+    
+    if (!gemAmount || typeof gemAmount !== 'number' || gemAmount <= 0) {
+      return res.status(400).json({ error: 'Invalid gem amount' });
     }
 
-    // Verify sender has enough gems
-    const senderRef = admin.firestore().collection('users').doc(senderId);
-    const senderDoc = await senderRef.get();
+    const db = admin.firestore();
     
-    if (!senderDoc.exists) {
-      return res.status(404).json({ error: 'Sender not found' });
-    }
+    // Get shop settings
+    const settingsDoc = await db.collection('settings').doc('shop').get();
+    const settings = settingsDoc.exists ? settingsDoc.data() : {};
+    const gemToCoinRate = settings.gemToCoinRate !== undefined ? settings.gemToCoinRate : 100;
+
+    const coinsToGet = gemAmount * gemToCoinRate;
+
+    await db.runTransaction(async (transaction) => {
+      const userRef = db.collection('users').doc(userId);
+      const userDoc = await transaction.get(userRef);
+      if (!userDoc.exists) throw new Error('User not found');
+
+      const userData = userDoc.data();
+      const currentGems = userData.gems || 0;
+
+      if (currentGems < gemAmount) {
+        throw new Error('Not enough gems to exchange');
+      }
+
+      transaction.update(userRef, {
+        gems: admin.firestore.FieldValue.increment(-gemAmount),
+        coins: admin.firestore.FieldValue.increment(coinsToGet),
+        totalCoinsEarned: admin.firestore.FieldValue.increment(coinsToGet),
+        weeklyCoins: admin.firestore.FieldValue.increment(coinsToGet)
+      });
+
+      // Log diamond transaction
+      const txRef = db.collection('diamondTransactions').doc();
+      transaction.set(txRef, {
+        userId,
+        amount: -gemAmount,
+        type: 'exchange',
+        description: `Exchanged ${gemAmount} gems for ${coinsToGet} coins`,
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+        balanceAfter: currentGems - gemAmount
+      });
+    });
+
+    res.status(200).json({ success: true, message: 'Exchange successful', coinsAdded: coinsToGet, gemsDeducted: gemAmount });
+  } catch (error) {
+    console.error('Error exchanging gems:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+// SECURE CLUB GIFT SENDING ENDPOINT
+app.post('/api/club/gift/send', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { recipientId, giftId, clubId, cost } = req.body;
+    const senderId = req.userId;
     
-    const senderData = senderDoc.data();
-    const currentGems = senderData.gems || 0;
-    
-    if (currentGems < cost) {
-      return res.status(400).json({ error: 'Not enough gems' });
+    if (!senderId || !giftId || !clubId || typeof cost !== 'number' || cost <= 0) {
+      return res.status(400).json({ error: 'Missing or invalid required fields' });
     }
 
-    // Transaction for secure deduction and addition
-    await admin.firestore().runTransaction(async (transaction) => {
-      // We must get the recipient first if there is one to perform reads before writes
+    const db = admin.firestore();
+
+    await db.runTransaction(async (transaction) => {
+      // 1. Verify gift cost from DB to prevent spoofing
+      let actualCost = cost;
+      const giftDocRef = db.collection('club_gifts').doc(giftId);
+      const giftDoc = await transaction.get(giftDocRef);
+      if (giftDoc.exists) {
+        actualCost = giftDoc.data().cost || cost;
+      }
+
+      // 2. We must get the recipient first if there is one to perform reads before writes
       let recipientRef = null;
       let recipientDoc = null;
       
       if (recipientId && recipientId !== 'all') {
-        recipientRef = admin.firestore().collection('users').doc(recipientId);
+        recipientRef = db.collection('users').doc(recipientId);
         recipientDoc = await transaction.get(recipientRef);
+        if (!recipientDoc.exists) {
+          throw new Error('Recipient not found');
+        }
       }
       
-      // Get sender in transaction
-      const tSenderDoc = await transaction.get(senderRef);
+      // 3. Get sender in transaction
+      const senderRef = db.collection('users').doc(senderId);
+      const senderDoc = await transaction.get(senderRef);
       
-      if (!tSenderDoc.exists) {
+      if (!senderDoc.exists) {
         throw new Error('Sender not found in transaction');
       }
 
-      const tSenderGems = tSenderDoc.data().gems || 0;
-      if (tSenderGems < cost) {
-        throw new Error('Not enough gems during transaction');
+      const senderGems = senderDoc.data().gems || 0;
+      if (senderGems < actualCost) {
+        throw new Error('Not enough gems to send this gift');
       }
 
-      // 1. Deduct from sender
+      // 4. Deduct from sender
       transaction.update(senderRef, {
-        gems: admin.firestore.FieldValue.increment(-cost)
+        gems: admin.firestore.FieldValue.increment(-actualCost)
       });
       
-      // 2. Add to recipient if not 'all'
+      // 5. Add to recipient if not 'all'
       if (recipientRef && recipientDoc && recipientDoc.exists) {
         transaction.update(recipientRef, {
-          gems: admin.firestore.FieldValue.increment(cost)
+          gems: admin.firestore.FieldValue.increment(actualCost)
+        });
+      }
+
+      // 6. Log diamond transaction for sender
+      const txRef = db.collection('diamondTransactions').doc();
+      transaction.set(txRef, {
+        userId: senderId,
+        amount: -actualCost,
+        type: 'club_gift_sent',
+        description: `Sent club gift to ${recipientId === 'all' ? 'everyone' : recipientId}`,
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+        balanceAfter: senderGems - actualCost
+      });
+
+      // 7. Log diamond transaction for recipient if applicable
+      if (recipientRef) {
+        const rxRef = db.collection('diamondTransactions').doc();
+        const recipientGems = recipientDoc.data().gems || 0;
+        transaction.set(rxRef, {
+          userId: recipientId,
+          amount: actualCost,
+          type: 'club_gift_received',
+          description: `Received club gift from ${senderId}`,
+          timestamp: admin.firestore.FieldValue.serverTimestamp(),
+          balanceAfter: recipientGems + actualCost
         });
       }
     });
 
     res.status(200).json({ success: true, message: 'Gift sent successfully' });
   } catch (error) {
-    console.error('Error in /api/gifts/send:', error.message);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('Error in /api/club/gift/send:', error.message);
+    res.status(400).json({ error: error.message || 'Internal server error' });
   }
 });
 
@@ -301,6 +472,414 @@ app.get('/stats', strictLimiter, (req, res) => {
     environment: process.env.NODE_ENV || 'development',
     nodeVersion: process.version
   });
+});
+
+// CLUB MANAGEMENT ENDPOINTS (Secure Backend Logic)
+app.post('/api/club/create', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { name, description, badge, isPrivate } = req.body;
+    const userId = req.userId;
+
+    if (!name || name.trim().length < 3) {
+      return res.status(400).json({ error: 'Invalid club name' });
+    }
+
+    const db = admin.firestore();
+    const userRef = db.collection('users').doc(userId);
+
+    // Generate invite code
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let inviteCode = '';
+    for (let i = 0; i < 6; i++) {
+      inviteCode += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+
+    let clubId = null;
+    let newClub = null;
+
+    await db.runTransaction(async (transaction) => {
+      const userDoc = await transaction.get(userRef);
+      if (!userDoc.exists) throw new Error('User not found');
+
+      if (userDoc.data().clubId) {
+        throw new Error('User is already in a club');
+      }
+
+      const clubRef = db.collection('clubs').doc();
+      clubId = clubRef.id;
+
+      newClub = {
+        name: name.trim(),
+        description: description ? description.trim() : '',
+        badge: badge || 'shield',
+        ownerId: userId,
+        ownerName: userDoc.data().username || 'Unknown',
+        memberCount: 1,
+        totalWins: 0,
+        totalGames: 0,
+        totalPoints: 0,
+        isPrivate: !!isPrivate,
+        inviteCode: inviteCode,
+        createdAt: new Date().toISOString(),
+        currentLeagueOrder: 1,
+        weeklyPoints: 0,
+        previousLeagueOrder: 1,
+        lastPromotedAt: null,
+        lastDemotedAt: null
+      };
+
+      transaction.set(clubRef, newClub);
+
+      transaction.update(userRef, {
+        clubId: clubId,
+        clubRole: 'owner'
+      });
+    });
+
+    res.status(200).json({ success: true, clubId, club: newClub });
+  } catch (error) {
+    console.error('Error creating club:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/club/join', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { clubId } = req.body;
+    const userId = req.userId;
+
+    if (!clubId) {
+      return res.status(400).json({ error: 'Club ID required' });
+    }
+
+    const db = admin.firestore();
+    const userRef = db.collection('users').doc(userId);
+    const clubRef = db.collection('clubs').doc(clubId);
+
+    await db.runTransaction(async (transaction) => {
+      const userDoc = await transaction.get(userRef);
+      if (!userDoc.exists) throw new Error('User not found');
+      if (userDoc.data().clubId) throw new Error('Already in a club');
+
+      const clubDoc = await transaction.get(clubRef);
+      if (!clubDoc.exists) throw new Error('Club not found');
+
+      transaction.update(clubRef, {
+        memberCount: admin.firestore.FieldValue.increment(1)
+      });
+
+      transaction.update(userRef, {
+        clubId: clubId,
+        clubRole: 'member'
+      });
+    });
+
+    res.status(200).json({ success: true, message: 'Joined club successfully' });
+  } catch (error) {
+    console.error('Error joining club:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/club/leave', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const db = admin.firestore();
+    const userRef = db.collection('users').doc(userId);
+
+    await db.runTransaction(async (transaction) => {
+      const userDoc = await transaction.get(userRef);
+      if (!userDoc.exists) throw new Error('User not found');
+
+      const clubId = userDoc.data().clubId;
+      if (!clubId) throw new Error('Not in a club');
+
+      const clubRef = db.collection('clubs').doc(clubId);
+      
+      transaction.update(userRef, {
+        clubId: admin.firestore.FieldValue.delete(),
+        clubRole: admin.firestore.FieldValue.delete(),
+        clubPoints: 0
+      });
+
+      // It's possible the club doc was deleted, check first or use update without fail
+      const clubDoc = await transaction.get(clubRef);
+      if (clubDoc.exists) {
+        transaction.update(clubRef, {
+          memberCount: admin.firestore.FieldValue.increment(-1)
+        });
+      }
+    });
+
+    res.status(200).json({ success: true, message: 'Left club successfully' });
+  } catch (error) {
+    console.error('Error leaving club:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/club/update-settings', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { clubId, name, description, maxMembers, isPrivate, minLevel, badge } = req.body;
+    const userId = req.userId;
+
+    if (!clubId || !name || name.trim().length < 3) {
+      return res.status(400).json({ error: 'Invalid club data' });
+    }
+
+    const db = admin.firestore();
+    const clubRef = db.collection('clubs').doc(clubId);
+
+    await db.runTransaction(async (transaction) => {
+      const clubDoc = await transaction.get(clubRef);
+      if (!clubDoc.exists) throw new Error('Club not found');
+
+      const clubData = clubDoc.data();
+      if (clubData.ownerId !== userId) {
+        throw new Error('Only the club owner can update settings');
+      }
+
+      transaction.update(clubRef, {
+        name: name.trim(),
+        description: description ? description.trim() : '',
+        maxMembers: parseInt(maxMembers) || 50,
+        isPrivate: !!isPrivate,
+        minLevel: parseInt(minLevel) || 1,
+        badge: badge || 'shield',
+        updatedAt: new Date().toISOString()
+      });
+    });
+
+    res.status(200).json({ success: true, message: 'Club settings updated' });
+  } catch (error) {
+    console.error('Error updating club settings:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/club/kick-member', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { clubId, memberId } = req.body;
+    const userId = req.userId;
+
+    if (!clubId || !memberId) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    if (memberId === userId) {
+      return res.status(400).json({ error: 'Cannot kick yourself' });
+    }
+
+    const db = admin.firestore();
+    const clubRef = db.collection('clubs').doc(clubId);
+    const memberRef = db.collection('users').doc(memberId);
+
+    await db.runTransaction(async (transaction) => {
+      const clubDoc = await transaction.get(clubRef);
+      if (!clubDoc.exists) throw new Error('Club not found');
+
+      if (clubDoc.data().ownerId !== userId) {
+        throw new Error('Only club owner can kick members');
+      }
+
+      const memberDoc = await transaction.get(memberRef);
+      if (!memberDoc.exists || memberDoc.data().clubId !== clubId) {
+        throw new Error('Member not found in this club');
+      }
+
+      transaction.update(memberRef, {
+        clubId: admin.firestore.FieldValue.delete(),
+        clubRole: admin.firestore.FieldValue.delete(),
+        clubPoints: 0
+      });
+
+      transaction.update(clubRef, {
+        memberCount: admin.firestore.FieldValue.increment(-1)
+      });
+    });
+
+    res.status(200).json({ success: true, message: 'Member kicked successfully' });
+  } catch (error) {
+    console.error('Error kicking member:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/club/promote-member', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { clubId, memberId, newRole } = req.body;
+    const userId = req.userId;
+
+    if (!clubId || !memberId || !newRole) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const validRoles = ['member', 'supervisor', 'mini-admin', 'admin'];
+    if (!validRoles.includes(newRole)) {
+      return res.status(400).json({ error: 'Invalid role' });
+    }
+
+    const db = admin.firestore();
+    const clubRef = db.collection('clubs').doc(clubId);
+    const memberRef = db.collection('users').doc(memberId);
+
+    await db.runTransaction(async (transaction) => {
+      const clubDoc = await transaction.get(clubRef);
+      if (!clubDoc.exists) throw new Error('Club not found');
+
+      if (clubDoc.data().ownerId !== userId) {
+        throw new Error('Only club owner can promote members');
+      }
+
+      const memberDoc = await transaction.get(memberRef);
+      if (!memberDoc.exists || memberDoc.data().clubId !== clubId) {
+        throw new Error('Member not found in this club');
+      }
+
+      transaction.update(memberRef, {
+        clubRole: newRole
+      });
+    });
+
+    res.status(200).json({ success: true, message: `Member promoted to ${newRole}` });
+  } catch (error) {
+    console.error('Error promoting member:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+// CLUB ENDPOINTS (Secure Backend Logic)
+app.post('/api/club/award-points', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { points = 10 } = req.body;
+    const userId = req.userId;
+
+    const db = admin.firestore();
+    const userRef = db.collection('users').doc(userId);
+
+    let clubId = null;
+
+    await db.runTransaction(async (transaction) => {
+      const userDoc = await transaction.get(userRef);
+      if (!userDoc.exists) throw new Error('User not found');
+
+      const userData = userDoc.data();
+      clubId = userData.clubId;
+
+      if (!clubId) throw new Error('User is not in a club');
+
+      // Update user's club points
+      transaction.update(userRef, {
+        clubPoints: admin.firestore.FieldValue.increment(points),
+        totalClubPoints: admin.firestore.FieldValue.increment(points)
+      });
+
+      // Update club's total points and weekly points
+      const clubRef = db.collection('clubs').doc(clubId);
+      transaction.update(clubRef, {
+        totalPoints: admin.firestore.FieldValue.increment(points),
+        weeklyPoints: admin.firestore.FieldValue.increment(points),
+        lastUpdated: new Date().toISOString()
+      });
+    });
+
+    res.status(200).json({ success: true, points, clubId, message: `+${points} Club Points!` });
+  } catch (error) {
+    console.error('Error awarding club points:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/club/process-weekend', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    // Only allow an admin/system user to run this, or run it once safely.
+    // Since frontend triggers it when it detects the timer ending, we'll use a global lock.
+    const db = admin.firestore();
+    const lockRef = db.collection('system').doc('league_processing');
+    
+    let processStarted = false;
+
+    await db.runTransaction(async (transaction) => {
+      const lockDoc = await transaction.get(lockRef);
+      const now = Date.now();
+
+      if (lockDoc.exists) {
+        const lockData = lockDoc.data();
+        if (lockData.isProcessing && (now - lockData.timestamp < 5 * 60 * 1000)) {
+          throw new Error('Already processing');
+        }
+        
+        // Prevent running multiple times in the same hour
+        if (lockData.lastProcessed && (now - lockData.lastProcessed < 60 * 60 * 1000)) {
+          throw new Error('Already processed this cycle');
+        }
+      }
+
+      transaction.set(lockRef, {
+        isProcessing: true,
+        timestamp: now
+      }, { merge: true });
+
+      processStarted = true;
+    });
+
+    if (!processStarted) {
+      return res.status(200).json({ success: false, message: 'Skipped processing' });
+    }
+
+    // Now process the rewards securely on the backend
+    const clubsSnapshot = await db.collection('clubs').get();
+    
+    // Create batches for all updates
+    const batches = [];
+    let currentBatch = db.batch();
+    let opCount = 0;
+
+    const getNextBatch = () => {
+      if (opCount >= 400) {
+        batches.push(currentBatch);
+        currentBatch = db.batch();
+        opCount = 0;
+      }
+      return currentBatch;
+    };
+
+    // Note: Here we simplify the distribution logic.
+    // The exact league definitions should ideally be imported, but we'll approximate the core logic
+    // or just reset points for now to ensure security. 
+    // For full security, the backend needs the CLUB_LEAGUES array.
+
+    // Just resetting weekly points securely for all clubs
+    clubsSnapshot.docs.forEach(clubDoc => {
+      const clubRef = db.collection('clubs').doc(clubDoc.id);
+      const currentPoints = clubDoc.data().weeklyPoints || 0;
+      
+      const batch = getNextBatch();
+      batch.update(clubRef, {
+        weeklyPoints: 0,
+        lastWeekPoints: currentPoints,
+        pointsResetAt: new Date().toISOString(),
+      });
+      opCount++;
+    });
+
+    if (opCount > 0) batches.push(currentBatch);
+    
+    for (const batch of batches) {
+      await batch.commit();
+    }
+
+    // Release lock
+    await lockRef.set({
+      isProcessing: false,
+      lastProcessed: Date.now()
+    }, { merge: true });
+
+    res.status(200).json({ success: true, message: 'League processed successfully' });
+  } catch (error) {
+    console.error('Error processing league weekend:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
 });
 
 // SECURE FINANCIAL VALIDATION ENDPOINTS
@@ -1512,7 +2091,7 @@ ludoGameServer.startConnectionMonitoring();
 console.log("✅ Ludo Game Server initialized with real-time Socket.IO sync");
 
 // Initialize Club Chat Server
-const clubChatServer = new ClubChatServer(io);
+const clubChatServer = new ClubChatServer(io, admin);
 clubChatServer.initialize();
 
 console.log("✅ Club Chat Server initialized with real-time messaging");
