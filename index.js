@@ -305,7 +305,7 @@ app.get('/stats', strictLimiter, (req, res) => {
 
 // SECURE FINANCIAL VALIDATION ENDPOINTS
 // Authentication middleware for financial operations
-function authenticateFinancialRequest(req, res, next) {
+async function authenticateFinancialRequest(req, res, next) {
   const authHeader = req.headers.authorization;
   const userId = req.headers['x-user-id'];
 
@@ -317,17 +317,24 @@ function authenticateFinancialRequest(req, res, next) {
     return res.status(400).json({ error: 'User ID required' });
   }
 
-  // In production, validate the JWT token here
-  // For now, we'll use a simple API key validation
   const token = authHeader.split(' ')[1];
-  const validApiKey = process.env.API_KEY || 'development-key';
 
-  if (token !== validApiKey) {
-    return res.status(401).json({ error: 'Invalid authentication token' });
+  try {
+    // Validate the Firebase JWT token
+    const decodedToken = await admin.auth().verifyIdToken(token);
+    
+    // Ensure the token's UID matches the requested userId
+    if (decodedToken.uid !== userId) {
+      console.warn(`🔒 [SECURITY] User ID mismatch. Token UID: ${decodedToken.uid}, Requested: ${userId}`);
+      return res.status(403).json({ error: 'Unauthorized user ID mismatch' });
+    }
+
+    req.userId = decodedToken.uid;
+    next();
+  } catch (error) {
+    console.error('🔒 [SECURITY] Token verification failed:', error.message);
+    return res.status(401).json({ error: 'Invalid or expired authentication token' });
   }
-
-  req.userId = userId;
-  next();
 };
 
 // Undo roll tracker for match-based pricing and limits
