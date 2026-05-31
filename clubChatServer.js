@@ -9,6 +9,11 @@ class ClubChatServer {
     this.admin = admin;
     this.clubRooms = new Map(); // clubId -> { members: Set, messages: [] }
     this.userSockets = new Map(); // userId -> { socketId, clubId, username }
+    // Server-side rate limiting: userId -> { count, windowStart }
+    this._rateLimitMap = new Map();
+    this._rateLimitMax = 2;       // max messages per window
+    this._rateLimitWindowMs = 1000; // per 1 second
+    this._maxMessageLength = 500;   // max chars per message
   }
 
   /**
@@ -208,6 +213,19 @@ class ClubChatServer {
         return;
       }
 
+      // Server-side rate limiting (cannot be bypassed by client)
+      if (!this._checkRateLimit(userId)) {
+        socket.emit('club:send_error', { error: 'Rate limit exceeded. Slow down.' });
+        return;
+      }
+
+      // Server-side message length validation
+      if (!message || typeof message !== 'string' || message.trim().length === 0) {
+        socket.emit('club:send_error', { error: 'Invalid message' });
+        return;
+      }
+      const sanitizedMessage = message.trim().substring(0, this._maxMessageLength);
+
       const clubRoom = this.clubRooms.get(clubId);
       if (!clubRoom) {
         socket.emit('club:send_error', { error: 'Club room not found' });
@@ -227,7 +245,7 @@ class ClubChatServer {
         userId,
         username,
         avatar,
-        message: message.trim(),
+        message: sanitizedMessage,
         messageType,
         timestamp: Date.now(),
         deleted: false
@@ -242,7 +260,7 @@ class ClubChatServer {
       // Broadcast to all members in club
       this.io.to(`club:${clubId}`).emit('club:new_message', messageObj);
 
-      console.log(`💬 [MESSAGE] ${username} in club ${clubId}: ${message.substring(0, 50)}`);
+      console.log(`💬 [MESSAGE] ${username} in club ${clubId}: ${sanitizedMessage.substring(0, 50)}`);
     } catch (error) {
       console.error('❌ [SEND MESSAGE ERROR]', error);
       socket.emit('club:send_error', { error: error.message });
@@ -497,6 +515,30 @@ class ClubChatServer {
       totalMembers: clubRoom.members.size,
       timestamp: Date.now()
     });
+  }
+
+  /**
+   * Server-side rate limiter: max N messages per window per user
+   */
+  _checkRateLimit(userId) {
+    const now = Date.now();
+    const entry = this._rateLimitMap.get(userId) || { count: 0, windowStart: now };
+
+    if (now - entry.windowStart > this._rateLimitWindowMs) {
+      // Reset window
+      entry.count = 1;
+      entry.windowStart = now;
+    } else {
+      entry.count += 1;
+    }
+
+    this._rateLimitMap.set(userId, entry);
+
+    if (entry.count > this._rateLimitMax) {
+      console.warn(`⚠️ [RATE LIMIT] User ${userId} exceeded message rate limit`);
+      return false;
+    }
+    return true;
   }
 
   /**
