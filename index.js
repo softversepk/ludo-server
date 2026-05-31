@@ -613,6 +613,50 @@ app.post('/api/game/update-stats', strictLimiter, authenticateFinancialRequest, 
 
     // Fetch the updated doc to return the new values
     const updatedDoc = await userRef.get();
+    const data = updatedDoc.data();
+    
+    // SECURE LEADERBOARD UPDATE
+    try {
+      const leaderboardServer = req.app.get('leaderboardServer');
+      if (leaderboardServer) {
+        leaderboardServer.updatePlayerInternal({
+          userId,
+          username: data.username || 'Player',
+          avatar: data.avatar || 'default',
+          score: data.totalCoinsEarned || data.totalScore || data.xp || data.coins || 0,
+          wins: data.gamesWon || 0,
+          gamesPlayed: data.gamesPlayed || 0,
+          clubId: data.clubId || null
+        });
+
+        // If player is in a club, automatically update club stats and leaderboard
+        if (data.clubId) {
+          const clubRef = db.collection('clubs').doc(data.clubId);
+          const clubUpdates = {};
+          if (stats.won) clubUpdates.totalWins = admin.firestore.FieldValue.increment(1);
+          if (stats.played) clubUpdates.totalGames = admin.firestore.FieldValue.increment(1);
+          
+          if (Object.keys(clubUpdates).length > 0) {
+            await clubRef.update(clubUpdates);
+            
+            const clubDoc = await clubRef.get();
+            if (clubDoc.exists) {
+              const clubData = clubDoc.data();
+              leaderboardServer.updateClubInternal({
+                clubId: clubDoc.id,
+                clubName: clubData.name || 'Club',
+                badge: clubData.badge || 'default',
+                points: clubData.totalPoints || clubData.weeklyPoints || clubData.totalWins || 0,
+                memberCount: clubData.memberCount || clubData.members?.length || 0,
+                gamesPlayed: clubData.totalGames || 0
+              });
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error('❌ [SERVER-STATS] Leaderboard update error:', e);
+    }
     
     res.json({
       success: true,
@@ -703,6 +747,32 @@ app.post('/api/game/validate-win', strictLimiter, authenticateFinancialRequest, 
     }
 
     // For now, return calculated rewards for client to display
+    
+    // SECURE LEADERBOARD UPDATE AFTER WIN
+    try {
+      if (admin.apps.length) {
+        const userRef = admin.firestore().collection('users').doc(userId);
+        const userDoc = await userRef.get();
+        if (userDoc.exists) {
+          const data = userDoc.data();
+          const leaderboardServer = req.app.get('leaderboardServer');
+          if (leaderboardServer) {
+            leaderboardServer.updatePlayerInternal({
+              userId,
+              username: data.username || 'Player',
+              avatar: data.avatar || 'default',
+              score: data.totalCoinsEarned || data.totalScore || data.xp || data.coins || 0,
+              wins: data.gamesWon || 0,
+              gamesPlayed: data.gamesPlayed || 0,
+              clubId: data.clubId || null
+            });
+          }
+        }
+      }
+    } catch (e) {
+      console.error('❌ [SERVER-VALIDATION] Leaderboard update error:', e);
+    }
+
     res.json({
       success: true,
       rewards: {
@@ -1210,6 +1280,8 @@ console.log("✅ Club Chat Server initialized with real-time messaging");
 // Initialize Leaderboard Server
 const leaderboardServer = new LeaderboardServer(io);
 leaderboardServer.initialize();
+app.set('leaderboardServer', leaderboardServer);
+global.leaderboardServer = leaderboardServer;
 
 console.log("✅ Leaderboard Server initialized with real-time rankings");
 
