@@ -70,7 +70,7 @@ app.use(limiter);
 // Stricter rate limiting for sensitive endpoints
 const strictLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20, // limit each IP to 20 requests per windowMs
+  max: 100, // Increased limit from 20 to 100 for sensitive endpoints to prevent 429 during frequent setting toggles
   message: {
     error: 'Too many requests to this endpoint, please try again later.',
     retryAfter: 15 * 60
@@ -102,8 +102,18 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Rate limiting for profile updates specifically
+const profileLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 150, // 150 requests per minute to allow rapid setting toggles
+  message: {
+    error: 'Too many requests to this endpoint, please try again later.',
+    retryAfter: 60
+  }
+});
+
 // USER PROFILE SECURE ENDPOINTS
-app.post('/api/user/update-profile', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+app.post('/api/user/update-profile', profileLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const userId = req.userId;
     const { updates } = req.body;
