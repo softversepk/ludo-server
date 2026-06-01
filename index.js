@@ -2183,6 +2183,179 @@ app.post('/api/friends/remove', strictLimiter, authenticateFinancialRequest, asy
   }
 });
 
+// ==========================================
+// SECURE FRIEND CHAT SYSTEM
+// ==========================================
+
+const getChatRoomId = (userId1, userId2) => {
+  return [userId1, userId2].sort().join("_");
+};
+
+// Send a chat message securely
+app.post('/api/friends/chat/send', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { receiverId, message } = req.body;
+    const senderId = req.userId;
+
+    if (!receiverId || !message || !message.trim()) {
+      return res.status(400).json({ success: false, error: 'Missing receiver ID or message' });
+    }
+
+    const db = admin.firestore();
+    
+    // Ensure they are friends
+    const senderDoc = await db.collection('users').doc(senderId).get();
+    const friends = senderDoc.data()?.friends || [];
+    if (!friends.includes(receiverId)) {
+      return res.status(403).json({ success: false, error: 'Can only message friends' });
+    }
+
+    const chatRoomId = getChatRoomId(senderId, receiverId);
+    
+    // Add message to messages collection
+    const messageRef = db.collection("friendMessages").doc();
+    await messageRef.set({
+      chatRoomId,
+      senderId,
+      receiverId,
+      message: message.trim(),
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      read: false,
+    });
+
+    // Update or create chat room document
+    const chatRoomRef = db.collection("friendChats").doc(chatRoomId);
+    
+    await db.runTransaction(async (transaction) => {
+      const chatRoomDoc = await transaction.get(chatRoomRef);
+      
+      if (chatRoomDoc.exists) {
+        const data = chatRoomDoc.data();
+        transaction.update(chatRoomRef, {
+          lastMessage: message.trim(),
+          lastMessageTime: admin.firestore.FieldValue.serverTimestamp(),
+          lastSenderId: senderId,
+          [`unreadCount_${receiverId}`]: (data[`unreadCount_${receiverId}`] || 0) + 1,
+        });
+      } else {
+        transaction.set(chatRoomRef, {
+          participants: [senderId, receiverId],
+          lastMessage: message.trim(),
+          lastMessageTime: admin.firestore.FieldValue.serverTimestamp(),
+          lastSenderId: senderId,
+          [`unreadCount_${senderId}`]: 0,
+          [`unreadCount_${receiverId}`]: 1,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+    });
+
+    // Optionally create a notification (ignoring failure if it happens)
+    try {
+      await db.collection("notifications").add({
+        userId: receiverId,
+        type: 'chat_message',
+        fromUserId: senderId,
+        message: message.trim(),
+        read: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    } catch (e) {
+      console.warn("Could not create chat notification:", e);
+    }
+
+    res.json({ success: true, messageId: messageRef.id });
+  } catch (error) {
+    console.error('[SERVER-CHAT] Error sending message:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Mark chat messages as read
+app.post('/api/friends/chat/read', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { friendId } = req.body;
+    const userId = req.userId;
+
+    if (!friendId) {
+      return res.status(400).json({ success: false, error: 'Missing friend ID' });
+    }
+
+    const db = admin.firestore();
+    const chatRoomId = getChatRoomId(userId, friendId);
+    const chatRoomRef = db.collection("friendChats").doc(chatRoomId);
+
+    await db.runTransaction(async (transaction) => {
+      const chatRoomDoc = await transaction.get(chatRoomRef);
+      if (chatRoomDoc.exists) {
+        transaction.update(chatRoomRef, {
+          [`unreadCount_${userId}`]: 0,
+        });
+      } else {
+        transaction.set(chatRoomRef, {
+          participants: [userId, friendId],
+          [`unreadCount_${userId}`]: 0,
+          [`unreadCount_${friendId}`]: 0,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[SERVER-CHAT] Error marking messages as read:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Delete chat room
+app.post('/api/friends/chat/delete', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { friendId } = req.body;
+    const userId = req.userId;
+
+    if (!friendId) {
+      return res.status(400).json({ success: false, error: 'Missing friend ID' });
+    }
+
+    const db = admin.firestore();
+    const chatRoomId = getChatRoomId(userId, friendId);
+
+    // Delete all messages in the chat room (Batched)
+    const messagesQuery = await db.collection("friendMessages")
+      .where("chatRoomId", "==", chatRoomId)
+      .get();
+    
+    const batches = [];
+    let currentBatch = db.batch();
+    let opCount = 0;
+
+    messagesQuery.docs.forEach(doc => {
+      if (opCount >= 400) {
+        batches.push(currentBatch);
+        currentBatch = db.batch();
+        opCount = 0;
+      }
+      currentBatch.delete(doc.ref);
+      opCount++;
+    });
+
+    if (opCount > 0) batches.push(currentBatch);
+    
+    for (const batch of batches) {
+      await batch.commit();
+    }
+
+    // Delete the chat room document
+    await db.collection("friendChats").doc(chatRoomId).delete();
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[SERVER-CHAT] Error deleting chat room:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Server status endpoint
 app.get('/api/status', (req, res) => {
   res.json({
