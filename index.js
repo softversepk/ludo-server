@@ -139,6 +139,17 @@ app.post('/api/user/update-profile', strictLimiter, authenticateFinancialRequest
       validUpdates.settings = updates.settings;
     }
 
+    // Secure Game Status Update
+    if (updates.currentGame !== undefined) {
+      // Null means clearing the game status
+      validUpdates.currentGame = updates.currentGame;
+    }
+    
+    // Secure Last Active Update
+    if (updates.lastActive !== undefined) {
+      validUpdates.lastActive = admin.firestore.FieldValue.serverTimestamp();
+    }
+
     if (Object.keys(validUpdates).length > 0) {
       await userRef.update(validUpdates);
     }
@@ -2851,6 +2862,15 @@ io.on("connection", (socket) => {
       if (room.status === "waiting" && room.host) {
         await secureRefundCoins(room.host, room.betAmount || 100);
       }
+
+      // Clear host's game status securely
+      if (room.host) {
+        try {
+          admin.firestore().collection('users').doc(room.host).update({
+            currentGame: null
+          }).catch(() => {});
+        } catch (err) {}
+      }
       
       io.to(roomCode).emit("room_cancelled");
       delete rooms[roomCode];
@@ -2869,6 +2889,14 @@ io.on("connection", (socket) => {
       
       delete room.players[playerId];
       socket.leave(roomCode);
+
+      // Securely clear user's in-game status when they explicitly leave a room
+      try {
+        admin.firestore().collection('users').doc(playerId).update({
+          currentGame: null,
+          lastActive: admin.firestore.FieldValue.serverTimestamp()
+        }).catch(err => console.warn(`[SECURITY] Could not clear currentGame for leaving user ${playerId}:`, err.message));
+      } catch (err) {}
 
       // Check if any real human players are left
       const remainingPlayers = Object.values(room.players);
@@ -3631,10 +3659,18 @@ io.on("connection", (socket) => {
     // Handle Chess disconnect
     chessGameServer.handleDisconnect(socket);
 
-    // Remove from userSockets map (but keep userRooms so they can rejoin)
+    // Remove from userSockets map and clear game status securely
     for (const [uid, sid] of Object.entries(userSockets)) {
       if (sid === socket.id) {
         delete userSockets[uid];
+        
+        // Securely clear user's in-game status when they disconnect
+        try {
+          admin.firestore().collection('users').doc(uid).update({
+            currentGame: null,
+            lastActive: admin.firestore.FieldValue.serverTimestamp()
+          }).catch(err => console.warn(`[SECURITY] Could not clear currentGame for disconnected user ${uid}:`, err.message));
+        } catch (err) {}
         break;
       }
     }
