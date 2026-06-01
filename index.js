@@ -833,6 +833,138 @@ app.post('/api/club/promote-member', strictLimiter, authenticateFinancialRequest
   }
 });
 
+// Securely send club message
+app.post('/api/club/send-message', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { clubId, messageText, type = 'text', metadata = {} } = req.body;
+    const userId = req.userId;
+
+    if (!clubId || !messageText || !messageText.trim()) {
+      return res.status(400).json({ error: 'Invalid message data' });
+    }
+
+    const db = admin.firestore();
+    
+    // Check if user is in the club
+    const userDoc = await db.collection('users').doc(userId).get();
+    if (!userDoc.exists) throw new Error('User not found');
+    
+    const userData = userDoc.data();
+    if (userData.clubId !== clubId) {
+      throw new Error('You are not a member of this club');
+    }
+
+    // Add message
+    const messageData = {
+      userId: userId,
+      username: userData.username || 'Player',
+      avatar: userData.avatar || 'default',
+      message: messageText.trim(),
+      type: type,
+      metadata: metadata,
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    const docRef = await db.collection('clubs').doc(clubId).collection('messages').add(messageData);
+
+    res.status(200).json({ success: true, messageId: docRef.id });
+  } catch (error) {
+    console.error('Error sending club message:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+// Securely send club game invite
+app.post('/api/club/send-invite', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { clubId, inviteData } = req.body;
+    const userId = req.userId;
+
+    if (!clubId || !inviteData) {
+      return res.status(400).json({ error: 'Invalid invite data' });
+    }
+
+    const db = admin.firestore();
+    
+    // Verify membership
+    const userDoc = await db.collection('users').doc(userId).get();
+    if (!userDoc.exists || userDoc.data().clubId !== clubId) {
+      throw new Error('Not a member of this club');
+    }
+
+    const userData = userDoc.data();
+    const rtdb = admin.database();
+
+    // Get club members
+    const membersSnapshot = await db.collection('users').where('clubId', '==', clubId).get();
+    const recipientMembers = [];
+    membersSnapshot.forEach(doc => {
+      if (doc.id !== userId) recipientMembers.push(doc.id);
+    });
+
+    // Create RTDB room (simulating client multiplayerService logic, but from server)
+    const roomRef = rtdb.ref('gameRooms').push();
+    const roomCode = roomRef.key.substring(0, 6).toUpperCase();
+    
+    const roomData = {
+      id: roomCode,
+      status: 'waiting',
+      createdAt: admin.database.ServerValue.TIMESTAMP,
+      host: userId,
+      mode: 'club',
+      clubId: clubId,
+      playerCount: 1,
+      maxPlayers: recipientMembers.length + 1,
+      betAmount: inviteData.betAmount,
+      gameType: inviteData.gameType,
+      gameMode: inviteData.gameMode || 'classic',
+      players: {
+        [userId]: {
+          username: userData.username,
+          avatar: userData.avatar || 'default',
+          isReady: false
+        }
+      }
+    };
+    
+    await rtdb.ref(`gameRooms/${roomCode}`).set(roomData);
+
+    // Send invites
+    const promises = recipientMembers.map(memberId => {
+      const inviteRef = rtdb.ref(`gameInvites/${memberId}`).push();
+      return inviteRef.set({
+        id: inviteRef.key,
+        fromUserId: userId,
+        fromUsername: userData.username,
+        fromAvatar: userData.avatar || 'default',
+        toUserId: memberId,
+        gameType: inviteData.gameType,
+        gameName: inviteData.gameName,
+        betAmount: inviteData.betAmount,
+        roomCode: roomCode,
+        clubId: clubId,
+        gameMode: inviteData.gameMode || 'classic',
+        isClubInvite: true,
+        status: 'pending',
+        timestamp: admin.database.ServerValue.TIMESTAMP,
+        expiresAt: Date.now() + 60000
+      });
+    });
+
+    await Promise.all(promises);
+
+    res.status(200).json({ 
+      success: true, 
+      roomCode: roomCode,
+      totalMembers: recipientMembers.length + 1,
+      invitedMembers: recipientMembers.length
+    });
+  } catch (error) {
+    console.error('Error sending club invite:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
 // CLUB ENDPOINTS (Secure Backend Logic)
 app.post('/api/club/award-points', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
