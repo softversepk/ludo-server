@@ -2135,6 +2135,82 @@ app.post('/api/coins/transaction', strictLimiter, authenticateFinancialRequest, 
 // SECURE FRIEND REQUEST SYSTEM
 // ==========================================
 
+// Get friend details securely (public profile only)
+app.post('/api/friends/details', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { friendIds } = req.body;
+    if (!Array.isArray(friendIds)) return res.status(400).json({ success: false, error: 'Invalid friendIds array' });
+
+    const db = admin.firestore();
+    const friendsData = [];
+    
+    // Fetch in chunks of 10 (Firestore limitation for 'in' queries, though we are doing individual gets here which is fine for small arrays)
+    // We'll just map over them
+    const promises = friendIds.map(async (id) => {
+      const docSnap = await db.collection('users').doc(id).get();
+      if (docSnap.exists) {
+        const data = docSnap.data();
+        friendsData.push({
+          id: docSnap.id,
+          name: data.username || data.displayName || 'Unknown',
+          avatar: data.avatar || 'default',
+          level: data.level || 1,
+          club: data.clubName || null,
+          status: 'offline', // Default, logic on client or we can determine here
+          lastActive: data.lastActive,
+          currentGame: data.currentGame || null,
+          settings: data.settings || {}
+        });
+      }
+    });
+    
+    await Promise.all(promises);
+    res.json({ success: true, friends: friendsData });
+  } catch (error) {
+    console.error('[SERVER-FRIENDS] Error fetching friend details:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Search users securely
+app.post('/api/friends/search', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { currentUserId, currentFriends } = req.body;
+    if (currentUserId !== req.userId) return res.status(403).json({ success: false, error: 'Unauthorized user' });
+
+    const db = admin.firestore();
+    const usersQuery = db.collection('users').limit(100); // Limit to prevent massive reads
+    const snapshot = await usersQuery.get();
+    
+    const users = [];
+    snapshot.forEach(docSnap => {
+      const data = docSnap.data();
+      // Exclude current user, current friends, and bots
+      if (
+        docSnap.id !== currentUserId && 
+        !(currentFriends || []).includes(docSnap.id) &&
+        !docSnap.id.startsWith('bot_')
+      ) {
+        // Exclude users with private accounts
+        if (data.settings?.privateAccount) return;
+
+        users.push({
+          id: docSnap.id,
+          name: data.username || data.displayName || 'Unknown',
+          avatar: data.avatar || 'default',
+          level: data.level || 1,
+          club: data.clubName || null,
+        });
+      }
+    });
+    
+    res.json({ success: true, users });
+  } catch (error) {
+    console.error('[SERVER-FRIENDS] Error searching users:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Send friend request
 app.post('/api/friends/request/send', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
