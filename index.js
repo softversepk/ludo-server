@@ -36,9 +36,6 @@ try {
 
 const app = express();
 
-// Trust proxy (required for correct client IP detection on Railway behind reverse proxy)
-app.set('trust proxy', 1);
-
 // Security middleware
 app.use(helmet({
   contentSecurityPolicy: {
@@ -56,10 +53,10 @@ app.use(helmet({
   }
 }));
 
-// Rate limiting (Global IP-based)
+// Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 500, // limit each IP to 500 requests per windowMs (increased to accommodate multiple players)
+  max: 100, // limit each IP to 100 requests per windowMs
   message: {
     error: 'Too many requests from this IP, please try again later.',
     retryAfter: 15 * 60 // 15 minutes in seconds
@@ -70,53 +67,14 @@ const limiter = rateLimit({
 
 app.use(limiter);
 
-// Specialized user-based rate limiters (run after authenticateFinancialRequest to rate-limit by user ID)
+// Stricter rate limiting for sensitive endpoints
 const strictLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 30, // limit each user/IP to 30 requests per windowMs
-  keyGenerator: (req) => req.userId || req.ip,
+  max: 20, // limit each IP to 20 requests per windowMs
   message: {
     error: 'Too many requests to this endpoint, please try again later.',
     retryAfter: 15 * 60
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-const profileLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 150, // limit each user/IP to 150 requests per windowMs (allows frequent game status updates)
-  keyGenerator: (req) => req.userId || req.ip,
-  message: {
-    error: 'Too many requests to this endpoint, please try again later.',
-    retryAfter: 15 * 60
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-const chatLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 200, // limit each user/IP to 200 requests per windowMs (allows active chat messages)
-  keyGenerator: (req) => req.userId || req.ip,
-  message: {
-    error: 'Too many requests to this endpoint, please try again later.',
-    retryAfter: 15 * 60
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-const gameLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each user/IP to 100 requests per windowMs (allows game actions and voice tokens)
-  keyGenerator: (req) => req.userId || req.ip,
-  message: {
-    error: 'Too many requests to this endpoint, please try again later.',
-    retryAfter: 15 * 60
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
+  }
 });
 
 // Body parsing with size limits
@@ -145,7 +103,7 @@ app.get('/health', (req, res) => {
 });
 
 // USER PROFILE SECURE ENDPOINTS
-app.post('/api/user/update-profile', authenticateFinancialRequest, profileLimiter, async (req, res) => {
+app.post('/api/user/update-profile', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const userId = req.userId;
     const { updates } = req.body;
@@ -181,17 +139,6 @@ app.post('/api/user/update-profile', authenticateFinancialRequest, profileLimite
       validUpdates.settings = updates.settings;
     }
 
-    // Secure Game Status Update
-    if (updates.currentGame !== undefined) {
-      // Null means clearing the game status
-      validUpdates.currentGame = updates.currentGame;
-    }
-    
-    // Secure Last Active Update
-    if (updates.lastActive !== undefined) {
-      validUpdates.lastActive = admin.firestore.FieldValue.serverTimestamp();
-    }
-
     if (Object.keys(validUpdates).length > 0) {
       await userRef.update(validUpdates);
     }
@@ -203,7 +150,7 @@ app.post('/api/user/update-profile', authenticateFinancialRequest, profileLimite
   }
 });
 
-app.post('/api/user/record-login', authenticateFinancialRequest, strictLimiter, async (req, res) => {
+app.post('/api/user/record-login', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const userId = req.userId;
     const db = admin.firestore();
@@ -242,7 +189,7 @@ app.post('/api/user/record-login', authenticateFinancialRequest, strictLimiter, 
 });
 
 // ECONOMY ENDPOINTS
-app.post('/api/economy/update', authenticateFinancialRequest, strictLimiter, async (req, res) => {
+app.post('/api/economy/update', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { currency, amount, type, reason, description } = req.body;
     const userId = req.userId;
@@ -304,7 +251,7 @@ app.post('/api/economy/update', authenticateFinancialRequest, strictLimiter, asy
 
 
 // SHOP WATCH VIDEO ENDPOINT
-app.post('/api/shop/watch-video', authenticateFinancialRequest, strictLimiter, async (req, res) => {
+app.post('/api/shop/watch-video', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const userId = req.userId;
     const db = admin.firestore();
@@ -355,7 +302,7 @@ app.post('/api/shop/watch-video', authenticateFinancialRequest, strictLimiter, a
 });
 
 // SHOP RATE US ENDPOINT
-app.post('/api/shop/rate-us', authenticateFinancialRequest, strictLimiter, async (req, res) => {
+app.post('/api/shop/rate-us', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const userId = req.userId;
     const db = admin.firestore();
@@ -393,7 +340,7 @@ app.post('/api/shop/rate-us', authenticateFinancialRequest, strictLimiter, async
 });
 
 // SHOP EXCHANGE GEMS FOR COINS ENDPOINT
-app.post('/api/shop/exchange', authenticateFinancialRequest, strictLimiter, async (req, res) => {
+app.post('/api/shop/exchange', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { gemAmount } = req.body;
     const userId = req.userId;
@@ -450,7 +397,7 @@ app.post('/api/shop/exchange', authenticateFinancialRequest, strictLimiter, asyn
 });
 
 // SECURE CLUB GIFT SENDING ENDPOINT
-app.post('/api/club/gift/send', authenticateFinancialRequest, strictLimiter, async (req, res) => {
+app.post('/api/club/gift/send', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { recipientId, giftId, clubId, cost } = req.body;
     const senderId = req.userId;
@@ -541,7 +488,7 @@ app.post('/api/club/gift/send', authenticateFinancialRequest, strictLimiter, asy
 });
 
 // AGORA TOKEN GENERATION ENDPOINT (Secure)
-app.get('/rtcToken', authenticateFinancialRequest, gameLimiter, (req, res) => {
+app.get('/rtcToken', strictLimiter, authenticateFinancialRequest, (req, res) => {
     res.header('Cache-Control', 'private, no-cache, no-store, must-revalidate');
     res.header('Expires', '-1');
     res.header('Pragma', 'no-cache');
@@ -613,7 +560,7 @@ app.get('/stats', strictLimiter, (req, res) => {
 });
 
 // CLUB MANAGEMENT ENDPOINTS (Secure Backend Logic)
-app.post('/api/club/create', authenticateFinancialRequest, strictLimiter, async (req, res) => {
+app.post('/api/club/create', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { name, description, badge, isPrivate } = req.body;
     const userId = req.userId;
@@ -681,7 +628,7 @@ app.post('/api/club/create', authenticateFinancialRequest, strictLimiter, async 
   }
 });
 
-app.post('/api/club/join', authenticateFinancialRequest, strictLimiter, async (req, res) => {
+app.post('/api/club/join', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { clubId } = req.body;
     const userId = req.userId;
@@ -719,7 +666,7 @@ app.post('/api/club/join', authenticateFinancialRequest, strictLimiter, async (r
   }
 });
 
-app.post('/api/club/leave', authenticateFinancialRequest, strictLimiter, async (req, res) => {
+app.post('/api/club/leave', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const userId = req.userId;
     const db = admin.firestore();
@@ -756,7 +703,7 @@ app.post('/api/club/leave', authenticateFinancialRequest, strictLimiter, async (
   }
 });
 
-app.post('/api/club/update-settings', authenticateFinancialRequest, strictLimiter, async (req, res) => {
+app.post('/api/club/update-settings', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { clubId, name, description, maxMembers, isPrivate, minLevel, badge } = req.body;
     const userId = req.userId;
@@ -795,7 +742,7 @@ app.post('/api/club/update-settings', authenticateFinancialRequest, strictLimite
   }
 });
 
-app.post('/api/club/kick-member', authenticateFinancialRequest, strictLimiter, async (req, res) => {
+app.post('/api/club/kick-member', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { clubId, memberId } = req.body;
     const userId = req.userId;
@@ -843,7 +790,7 @@ app.post('/api/club/kick-member', authenticateFinancialRequest, strictLimiter, a
   }
 });
 
-app.post('/api/club/promote-member', authenticateFinancialRequest, strictLimiter, async (req, res) => {
+app.post('/api/club/promote-member', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { clubId, memberId, newRole } = req.body;
     const userId = req.userId;
@@ -887,7 +834,7 @@ app.post('/api/club/promote-member', authenticateFinancialRequest, strictLimiter
 });
 
 // CLUB ENDPOINTS (Secure Backend Logic)
-app.post('/api/club/award-points', authenticateFinancialRequest, gameLimiter, async (req, res) => {
+app.post('/api/club/award-points', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { points = 10 } = req.body;
     const userId = req.userId;
@@ -928,7 +875,7 @@ app.post('/api/club/award-points', authenticateFinancialRequest, gameLimiter, as
   }
 });
 
-app.post('/api/club/process-weekend', authenticateFinancialRequest, strictLimiter, async (req, res) => {
+app.post('/api/club/process-weekend', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     // Only allow an admin/system user to run this, or run it once safely.
     // Since frontend triggers it when it detects the timer ending, we'll use a global lock.
@@ -1030,7 +977,7 @@ app.post('/api/club/process-weekend', authenticateFinancialRequest, strictLimite
   }
 });
 
-app.post('/api/club/reset-all-points', authenticateFinancialRequest, strictLimiter, async (req, res) => {
+app.post('/api/club/reset-all-points', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const userId = req.userId;
     const db = admin.firestore();
@@ -1188,7 +1135,7 @@ setInterval(() => {
 }, 60 * 60 * 1000);
 
 // SECURE UNDO ROLL ENDPOINT
-app.post('/api/game/undo-roll', authenticateFinancialRequest, gameLimiter, async (req, res) => {
+app.post('/api/game/undo-roll', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { userId, roomId, gameType, matchId, expectedCost } = req.body;
 
@@ -1279,7 +1226,7 @@ app.post('/api/game/undo-roll', authenticateFinancialRequest, gameLimiter, async
 });
 
 // CHEST BOX CLAIM ENDPOINT (Highly Secure)
-app.post('/api/chest/claim', authenticateFinancialRequest, strictLimiter, async (req, res) => {
+app.post('/api/chest/claim', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { chestId } = req.body;
     const userId = req.userId;
@@ -1410,7 +1357,7 @@ app.post('/api/chest/claim', authenticateFinancialRequest, strictLimiter, async 
 });
 
 // SECURE SKIN SELECTION ENDPOINT
-app.post('/api/skins/select', authenticateFinancialRequest, strictLimiter, async (req, res) => {
+app.post('/api/skins/select', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { userId, gameName, skinId, type } = req.body;
 
@@ -1487,7 +1434,7 @@ app.post('/api/skins/select', authenticateFinancialRequest, strictLimiter, async
 });
 
 // SECURE REWARDS ENDPOINTS
-app.post('/api/rewards/claim-daily', authenticateFinancialRequest, strictLimiter, async (req, res) => {
+app.post('/api/rewards/claim-daily', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { userId } = req.body;
     if (!userId || userId !== req.userId) {
@@ -1560,7 +1507,7 @@ app.post('/api/rewards/claim-daily', authenticateFinancialRequest, strictLimiter
   }
 });
 
-app.post('/api/rewards/claim-achievement', authenticateFinancialRequest, strictLimiter, async (req, res) => {
+app.post('/api/rewards/claim-achievement', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { userId, achievementId } = req.body;
     if (!userId || !achievementId || userId !== req.userId) {
@@ -1643,7 +1590,7 @@ app.post('/api/rewards/claim-achievement', authenticateFinancialRequest, strictL
 });
 
 // Update Game Stats securely on the backend
-app.post('/api/game/update-stats', authenticateFinancialRequest, gameLimiter, async (req, res) => {
+app.post('/api/game/update-stats', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { userId, stats } = req.body;
 
@@ -1742,7 +1689,7 @@ app.post('/api/game/update-stats', authenticateFinancialRequest, gameLimiter, as
 });
 
 // Validate game win and award rewards
-app.post('/api/game/award-xp', authenticateFinancialRequest, gameLimiter, async (req, res) => {
+app.post('/api/game/award-xp', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { userId, action } = req.body;
     if (!userId || !action) {
@@ -1766,7 +1713,7 @@ app.post('/api/game/award-xp', authenticateFinancialRequest, gameLimiter, async 
   }
 });
 
-app.post('/api/game/validate-win', authenticateFinancialRequest, gameLimiter, async (req, res) => {
+app.post('/api/game/validate-win', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { userId, gameType, betAmount, gameData } = req.body;
 
@@ -1861,7 +1808,7 @@ app.post('/api/game/validate-win', authenticateFinancialRequest, gameLimiter, as
 });
 
 // SECURE GIFT SENDING ENDPOINT
-app.post('/api/gift/send', authenticateFinancialRequest, strictLimiter, async (req, res) => {
+app.post('/api/gift/send', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { fromUserId, toUserId, gift, roomId } = req.body;
 
@@ -1994,7 +1941,7 @@ app.post('/api/gift/send', authenticateFinancialRequest, strictLimiter, async (r
 });
 
 // Validate coin transaction
-app.post('/api/coins/transaction', authenticateFinancialRequest, strictLimiter, async (req, res) => {
+app.post('/api/coins/transaction', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { userId, operation, amount, reason } = req.body;
 
@@ -2057,7 +2004,7 @@ app.post('/api/coins/transaction', authenticateFinancialRequest, strictLimiter, 
 // ==========================================
 
 // Send friend request
-app.post('/api/friends/request/send', authenticateFinancialRequest, strictLimiter, async (req, res) => {
+app.post('/api/friends/request/send', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { fromUserId, toUserId } = req.body;
     if (!fromUserId || !toUserId) return res.status(400).json({ success: false, error: 'Missing user IDs' });
@@ -2115,7 +2062,7 @@ app.post('/api/friends/request/send', authenticateFinancialRequest, strictLimite
 });
 
 // Accept friend request
-app.post('/api/friends/request/accept', authenticateFinancialRequest, strictLimiter, async (req, res) => {
+app.post('/api/friends/request/accept', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { requestId, fromUserId, toUserId } = req.body;
     // toUserId in the request doc is the person accepting it, who should be req.userId
@@ -2166,7 +2113,7 @@ app.post('/api/friends/request/accept', authenticateFinancialRequest, strictLimi
 });
 
 // Reject friend request
-app.post('/api/friends/request/reject', authenticateFinancialRequest, strictLimiter, async (req, res) => {
+app.post('/api/friends/request/reject', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { requestId, fromUserId, toUserId } = req.body;
     if (toUserId !== req.userId) return res.status(403).json({ success: false, error: 'Unauthorized user' });
@@ -2199,7 +2146,7 @@ app.post('/api/friends/request/reject', authenticateFinancialRequest, strictLimi
 });
 
 // Remove friend
-app.post('/api/friends/remove', authenticateFinancialRequest, strictLimiter, async (req, res) => {
+app.post('/api/friends/remove', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { userId, friendId } = req.body;
     if (userId !== req.userId) return res.status(403).json({ success: false, error: 'Unauthorized user' });
@@ -2232,179 +2179,6 @@ app.post('/api/friends/remove', authenticateFinancialRequest, strictLimiter, asy
     res.json({ success: true });
   } catch (error) {
     console.error('[SERVER-FRIENDS] Error removing friend:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// ==========================================
-// SECURE FRIEND CHAT SYSTEM
-// ==========================================
-
-const getChatRoomId = (userId1, userId2) => {
-  return [userId1, userId2].sort().join("_");
-};
-
-// Send a chat message securely
-app.post('/api/friends/chat/send', authenticateFinancialRequest, chatLimiter, async (req, res) => {
-  try {
-    const { receiverId, message } = req.body;
-    const senderId = req.userId;
-
-    if (!receiverId || !message || !message.trim()) {
-      return res.status(400).json({ success: false, error: 'Missing receiver ID or message' });
-    }
-
-    const db = admin.firestore();
-    
-    // Ensure they are friends
-    const senderDoc = await db.collection('users').doc(senderId).get();
-    const friends = senderDoc.data()?.friends || [];
-    if (!friends.includes(receiverId)) {
-      return res.status(403).json({ success: false, error: 'Can only message friends' });
-    }
-
-    const chatRoomId = getChatRoomId(senderId, receiverId);
-    
-    // Add message to messages collection
-    const messageRef = db.collection("friendMessages").doc();
-    await messageRef.set({
-      chatRoomId,
-      senderId,
-      receiverId,
-      message: message.trim(),
-      timestamp: admin.firestore.FieldValue.serverTimestamp(),
-      read: false,
-    });
-
-    // Update or create chat room document
-    const chatRoomRef = db.collection("friendChats").doc(chatRoomId);
-    
-    await db.runTransaction(async (transaction) => {
-      const chatRoomDoc = await transaction.get(chatRoomRef);
-      
-      if (chatRoomDoc.exists) {
-        const data = chatRoomDoc.data();
-        transaction.update(chatRoomRef, {
-          lastMessage: message.trim(),
-          lastMessageTime: admin.firestore.FieldValue.serverTimestamp(),
-          lastSenderId: senderId,
-          [`unreadCount_${receiverId}`]: (data[`unreadCount_${receiverId}`] || 0) + 1,
-        });
-      } else {
-        transaction.set(chatRoomRef, {
-          participants: [senderId, receiverId],
-          lastMessage: message.trim(),
-          lastMessageTime: admin.firestore.FieldValue.serverTimestamp(),
-          lastSenderId: senderId,
-          [`unreadCount_${senderId}`]: 0,
-          [`unreadCount_${receiverId}`]: 1,
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
-      }
-    });
-
-    // Optionally create a notification (ignoring failure if it happens)
-    try {
-      await db.collection("notifications").add({
-        userId: receiverId,
-        type: 'chat_message',
-        fromUserId: senderId,
-        message: message.trim(),
-        read: false,
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
-      });
-    } catch (e) {
-      console.warn("Could not create chat notification:", e);
-    }
-
-    res.json({ success: true, messageId: messageRef.id });
-  } catch (error) {
-    console.error('[SERVER-CHAT] Error sending message:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Mark chat messages as read
-app.post('/api/friends/chat/read', authenticateFinancialRequest, chatLimiter, async (req, res) => {
-  try {
-    const { friendId } = req.body;
-    const userId = req.userId;
-
-    if (!friendId) {
-      return res.status(400).json({ success: false, error: 'Missing friend ID' });
-    }
-
-    const db = admin.firestore();
-    const chatRoomId = getChatRoomId(userId, friendId);
-    const chatRoomRef = db.collection("friendChats").doc(chatRoomId);
-
-    await db.runTransaction(async (transaction) => {
-      const chatRoomDoc = await transaction.get(chatRoomRef);
-      if (chatRoomDoc.exists) {
-        transaction.update(chatRoomRef, {
-          [`unreadCount_${userId}`]: 0,
-        });
-      } else {
-        transaction.set(chatRoomRef, {
-          participants: [userId, friendId],
-          [`unreadCount_${userId}`]: 0,
-          [`unreadCount_${friendId}`]: 0,
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
-      }
-    });
-
-    res.json({ success: true });
-  } catch (error) {
-    console.error('[SERVER-CHAT] Error marking messages as read:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Delete chat room
-app.post('/api/friends/chat/delete', authenticateFinancialRequest, chatLimiter, async (req, res) => {
-  try {
-    const { friendId } = req.body;
-    const userId = req.userId;
-
-    if (!friendId) {
-      return res.status(400).json({ success: false, error: 'Missing friend ID' });
-    }
-
-    const db = admin.firestore();
-    const chatRoomId = getChatRoomId(userId, friendId);
-
-    // Delete all messages in the chat room (Batched)
-    const messagesQuery = await db.collection("friendMessages")
-      .where("chatRoomId", "==", chatRoomId)
-      .get();
-    
-    const batches = [];
-    let currentBatch = db.batch();
-    let opCount = 0;
-
-    messagesQuery.docs.forEach(doc => {
-      if (opCount >= 400) {
-        batches.push(currentBatch);
-        currentBatch = db.batch();
-        opCount = 0;
-      }
-      currentBatch.delete(doc.ref);
-      opCount++;
-    });
-
-    if (opCount > 0) batches.push(currentBatch);
-    
-    for (const batch of batches) {
-      await batch.commit();
-    }
-
-    // Delete the chat room document
-    await db.collection("friendChats").doc(chatRoomId).delete();
-
-    res.json({ success: true });
-  } catch (error) {
-    console.error('[SERVER-CHAT] Error deleting chat room:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -2904,15 +2678,6 @@ io.on("connection", (socket) => {
       if (room.status === "waiting" && room.host) {
         await secureRefundCoins(room.host, room.betAmount || 100);
       }
-
-      // Clear host's game status securely
-      if (room.host) {
-        try {
-          admin.firestore().collection('users').doc(room.host).update({
-            currentGame: null
-          }).catch(() => {});
-        } catch (err) {}
-      }
       
       io.to(roomCode).emit("room_cancelled");
       delete rooms[roomCode];
@@ -2931,14 +2696,6 @@ io.on("connection", (socket) => {
       
       delete room.players[playerId];
       socket.leave(roomCode);
-
-      // Securely clear user's in-game status when they explicitly leave a room
-      try {
-        admin.firestore().collection('users').doc(playerId).update({
-          currentGame: null,
-          lastActive: admin.firestore.FieldValue.serverTimestamp()
-        }).catch(err => console.warn(`[SECURITY] Could not clear currentGame for leaving user ${playerId}:`, err.message));
-      } catch (err) {}
 
       // Check if any real human players are left
       const remainingPlayers = Object.values(room.players);
@@ -3701,18 +3458,10 @@ io.on("connection", (socket) => {
     // Handle Chess disconnect
     chessGameServer.handleDisconnect(socket);
 
-    // Remove from userSockets map and clear game status securely
+    // Remove from userSockets map (but keep userRooms so they can rejoin)
     for (const [uid, sid] of Object.entries(userSockets)) {
       if (sid === socket.id) {
         delete userSockets[uid];
-        
-        // Securely clear user's in-game status when they disconnect
-        try {
-          admin.firestore().collection('users').doc(uid).update({
-            currentGame: null,
-            lastActive: admin.firestore.FieldValue.serverTimestamp()
-          }).catch(err => console.warn(`[SECURITY] Could not clear currentGame for disconnected user ${uid}:`, err.message));
-        } catch (err) {}
         break;
       }
     }
