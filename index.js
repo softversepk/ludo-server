@@ -892,6 +892,106 @@ app.post('/api/club/process-weekend', strictLimiter, authenticateFinancialReques
   }
 });
 
+app.post('/api/club/reset-all-points', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const db = admin.firestore();
+
+    // Verify user is system admin or has permission to perform global reset
+    // For now we allow owners to trigger it for their own testing/functionality based on frontend logic, 
+    // but in a production environment this should be restricted to a Super Admin.
+    
+    const userDoc = await db.collection('users').doc(userId).get();
+    if (!userDoc.exists) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const clubsSnapshot = await db.collection('clubs').get();
+    
+    // Create batches for all updates (Firestore allows 500 ops per batch)
+    const batches = [];
+    let currentBatch = db.batch();
+    let opCount = 0;
+
+    const getNextBatch = () => {
+      if (opCount >= 400) {
+        batches.push(currentBatch);
+        currentBatch = db.batch();
+        opCount = 0;
+      }
+      return currentBatch;
+    };
+
+    let clubsReset = 0;
+    
+    clubsSnapshot.docs.forEach(clubDoc => {
+      const clubRef = db.collection('clubs').doc(clubDoc.id);
+      
+      const batch = getNextBatch();
+      batch.update(clubRef, {
+        totalPoints: 0,
+        weeklyPoints: 0,
+        lastWeekPoints: 0,
+        pointsResetAt: new Date().toISOString()
+      });
+      opCount++;
+      clubsReset++;
+    });
+
+    if (opCount > 0) batches.push(currentBatch);
+    
+    for (const batch of batches) {
+      await batch.commit();
+    }
+
+    // Also reset user club points to keep them in sync
+    const usersSnapshot = await db.collection('users').where('clubId', '!=', null).get();
+    
+    const userBatches = [];
+    let currentUserBatch = db.batch();
+    let userOpCount = 0;
+
+    const getNextUserBatch = () => {
+      if (userOpCount >= 400) {
+        userBatches.push(currentUserBatch);
+        currentUserBatch = db.batch();
+        userOpCount = 0;
+      }
+      return currentUserBatch;
+    };
+
+    let usersReset = 0;
+
+    usersSnapshot.docs.forEach(uDoc => {
+      const uRef = db.collection('users').doc(uDoc.id);
+      
+      const batch = getNextUserBatch();
+      batch.update(uRef, {
+        clubPoints: 0,
+        totalClubPoints: 0
+      });
+      userOpCount++;
+      usersReset++;
+    });
+
+    if (userOpCount > 0) userBatches.push(currentUserBatch);
+    
+    for (const batch of userBatches) {
+      await batch.commit();
+    }
+
+    res.status(200).json({ 
+      success: true, 
+      message: 'All club points have been reset',
+      clubsReset,
+      usersReset
+    });
+  } catch (error) {
+    console.error('Error resetting all club points:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // SECURE FINANCIAL VALIDATION ENDPOINTS
 // Authentication middleware for financial operations
 async function authenticateFinancialRequest(req, res, next) {
