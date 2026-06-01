@@ -102,6 +102,91 @@ app.get('/health', (req, res) => {
   });
 });
 
+// USER PROFILE SECURE ENDPOINTS
+app.post('/api/user/update-profile', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const { updates } = req.body;
+    if (!updates) return res.status(400).json({ error: 'No updates provided' });
+
+    const db = admin.firestore();
+    const userRef = db.collection('users').doc(userId);
+    const validUpdates = {};
+
+    // Secure Username Validation
+    if (updates.username !== undefined) {
+      const trimmed = String(updates.username).trim();
+      if (trimmed.length < 3 || trimmed.length > 20) {
+        return res.status(400).json({ error: 'Username must be between 3 and 20 characters' });
+      }
+      if (!/^[a-zA-Z0-9_-]+$/.test(trimmed)) {
+        return res.status(400).json({ error: 'Username can only contain letters, numbers, _ and -' });
+      }
+      const bannedWords = ['admin', 'moderator', 'support', 'official'];
+      if (bannedWords.some(word => trimmed.toLowerCase().includes(word))) {
+        return res.status(400).json({ error: 'This username is not allowed' });
+      }
+      validUpdates.username = trimmed;
+    }
+
+    // Secure Avatar Update
+    if (updates.avatar !== undefined) {
+      validUpdates.avatar = String(updates.avatar);
+    }
+
+    // Secure Settings Update
+    if (updates.settings !== undefined) {
+      validUpdates.settings = updates.settings;
+    }
+
+    if (Object.keys(validUpdates).length > 0) {
+      await userRef.update(validUpdates);
+    }
+
+    res.status(200).json({ success: true, message: 'Profile updated securely' });
+  } catch (error) {
+    console.error('Error updating profile:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/user/record-login', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const db = admin.firestore();
+    
+    await db.runTransaction(async (transaction) => {
+      const userRef = db.collection('users').doc(userId);
+      const userDoc = await transaction.get(userRef);
+      if (!userDoc.exists) throw new Error('User not found');
+      
+      const userData = userDoc.data();
+      const today = new Date().toDateString();
+      const lastLogin = userData.lastLoginDate;
+      
+      if (lastLogin === today) return; // Already logged in today
+      
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yesterdayStr = yesterday.toDateString();
+      
+      let newStreak = 1;
+      if (lastLogin === yesterdayStr) {
+        newStreak = (userData.loginStreak || 0) + 1;
+      }
+      
+      transaction.update(userRef, {
+        lastLoginDate: today,
+        loginStreak: newStreak
+      });
+    });
+    
+    res.status(200).json({ success: true });
+  } catch (error) {
+    console.error('Error recording login:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 
 // ECONOMY ENDPOINTS
 app.post('/api/economy/update', strictLimiter, authenticateFinancialRequest, async (req, res) => {
