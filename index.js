@@ -2512,7 +2512,7 @@ Object.defineProperty(rooms, 'scheduleRoomDelete', {
 
 // Initialize Game Chat Server
 const GameChatServer = require("./gameChatServer");
-const gameChatServer = new GameChatServer(io);
+const gameChatServer = new GameChatServer(io, rooms, userSockets);
 gameChatServer.initialize();
 
 console.log("✅ Game Chat Server initialized with secure Socket.IO");
