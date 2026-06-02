@@ -29,6 +29,16 @@ class TicTacToeGameServer {
 
   handleResign(socket, { roomId, playerRole }) {
     try {
+      // SECURITY: Strict Input Validation
+      if (!roomId || typeof roomId !== 'string') {
+        console.warn(`[TicTacToe] Security Alert: Invalid roomId in resign`);
+        return;
+      }
+      if (playerRole !== 'X' && playerRole !== 'O') {
+        console.warn(`[TicTacToe] Security Alert: Invalid playerRole in resign`);
+        return;
+      }
+
       const room = this.rooms[roomId];
       if (!room || !room.gameState || room.status === 'game_over') return;
 
@@ -40,7 +50,7 @@ class TicTacToeGameServer {
       if (!playerId) return;
 
       const expectedSocketId = this.userSockets[playerId] || (room.players[playerId] && room.players[playerId].socketId);
-      if (expectedSocketId && socket.id !== expectedSocketId) {
+      if (!expectedSocketId || socket.id !== expectedSocketId) {
         console.warn(`[TicTacToe] Security Alert: Socket ${socket.id} attempted to resign for player ${playerId} (role ${playerRole}) but expected socket ${expectedSocketId}`);
         return;
       }
@@ -115,6 +125,20 @@ class TicTacToeGameServer {
 
   handleMakeMove(socket, { roomId, index, playerRole }) {
     try {
+      // SECURITY: Strict Input Validation
+      if (!roomId || typeof roomId !== 'string') {
+        console.warn(`[TicTacToe] Security Alert: Invalid roomId in make_move`);
+        return;
+      }
+      if (typeof index !== 'number' || !Number.isInteger(index) || index < 0 || index > 8) {
+        console.warn(`[TicTacToe] Security Alert: Invalid move index ${index} by socket ${socket.id}`);
+        return;
+      }
+      if (playerRole !== 'X' && playerRole !== 'O') {
+        console.warn(`[TicTacToe] Security Alert: Invalid playerRole ${playerRole} in make_move`);
+        return;
+      }
+
       const room = this.rooms[roomId];
       if (!room || !room.gameState) return;
 
@@ -133,7 +157,7 @@ class TicTacToeGameServer {
 
       // Allow if the socket matches the user's registered socket, OR if the socket matches the player's stored socketId
       const expectedSocketId = this.userSockets[playerId] || (room.players[playerId] && room.players[playerId].socketId);
-      if (expectedSocketId && socket.id !== expectedSocketId) {
+      if (!expectedSocketId || socket.id !== expectedSocketId) {
         console.warn(`[TicTacToe] Security Alert: Socket ${socket.id} attempted to move for player ${playerId} (role ${playerRole}) but expected socket ${expectedSocketId}`);
         return;
       }
@@ -270,10 +294,22 @@ class TicTacToeGameServer {
   }
 
   handleTriggerBot(socket, { roomId }) {
-    // Deprecated: Bots are now fully server-driven.
-    // We just return here to maintain backwards compatibility with clients
-    // that still emit this event.
-    return;
+    try {
+      if (!roomId || typeof roomId !== 'string') return;
+      const room = this.rooms[roomId];
+      if (!room || !room.gameState || room.status === 'game_over') return;
+      
+      const gameState = room.gameState;
+      const expectedRole = gameState.xIsNext ? 'X' : 'O';
+      const playerId = gameState.players[expectedRole];
+      const player = room.players[playerId];
+
+      if (player && player.isBot) {
+        this.playBotTurn(roomId);
+      }
+    } catch (error) {
+      console.error("[TicTacToe] Trigger Bot error:", error);
+    }
   }
 }
 
