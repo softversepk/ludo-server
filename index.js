@@ -2961,6 +2961,13 @@ io.on("connection", (socket) => {
       // SECURITY: Block unauthorized state updates
       const senderId = Object.keys(userSockets).find(key => userSockets[key] === socket.id);
       
+      // SECURITY: Block TicTacToe from being updated via this route, since it uses strict server-side logic
+      if (room.mode === "tictactoe" || room.gameMode === "tictactoe" || (room.gameState && room.gameState.board && room.gameState.board.length === 9)) {
+        console.warn(`[SECURITY] Blocked hacked update_game_state for TicTacToe in room ${roomCode}`);
+        if (callback) callback({ success: false, error: "Unauthorized state update for TicTacToe" });
+        return;
+      }
+      
       // If it's a bot's turn (or was just a bot's turn), only the host can update the state
       if (room.gameState && room.gameState.currentPlayer) {
         const previousPlayerId = room.players[room.gameState.currentPlayer]?.uid;
@@ -3334,13 +3341,34 @@ io.on("connection", (socket) => {
     if (room) {
       console.log(`[SERVER] Starting game for room ${roomCode}`);
       room.status = "playing";
-      room.gameState = gameState;
+      
+      // SECURITY: If it's TicTacToe, initialize state on the server to prevent hacked initial states
+      if (room.mode === "tictactoe" || room.gameMode === "tictactoe" || (gameState && gameState.board && gameState.board.length === 9)) {
+         const players = Object.keys(room.players);
+         const hostUid = room.host;
+         const opponentUid = players.find(uid => uid !== hostUid) || hostUid;
+         
+         // Enforce clean state
+         room.gameState = {
+            board: Array(9).fill(null),
+            xIsNext: true,
+            players: {
+                X: hostUid,
+                O: opponentUid,
+            },
+            winner: null,
+            winLine: null,
+         };
+      } else {
+         room.gameState = gameState;
+      }
+      
       room.startedAt = Date.now();
       io.to(roomCode).emit("room_update", room); // To update status
-      io.to(roomCode).emit("game_state_update", gameState); // Initial state
+      io.to(roomCode).emit("game_state_update", room.gameState); // Initial state
 
       // Trigger bot turn if the first player is a bot in Tic Tac Toe
-      if (room.mode === "tictactoe" && ticTacToeGameServer) {
+      if ((room.mode === "tictactoe" || room.gameMode === "tictactoe" || (room.gameState && room.gameState.board && room.gameState.board.length === 9)) && ticTacToeGameServer) {
         ticTacToeGameServer.playBotTurn(roomCode);
       }
     } else {
