@@ -596,9 +596,16 @@ app.post('/api/club/create', strictLimiter, authenticateFinancialRequest, async 
     const { name, description, badge, isPrivate } = req.body;
     const userId = req.userId;
 
-    if (!name || name.trim().length < 3) {
-      return res.status(400).json({ error: 'Invalid club name' });
+    if (!name || typeof name !== 'string' || name.trim().length < 3 || name.trim().length > 30) {
+      return res.status(400).json({ error: 'Invalid club name. Must be 3-30 characters.' });
     }
+
+    if (description && (typeof description !== 'string' || description.length > 200)) {
+      return res.status(400).json({ error: 'Description too long (max 200 characters).' });
+    }
+
+    const validBadges = ['shield', 'flag', 'trophy', 'star', 'ribbon', 'diamond', 'skull', 'flash', 'heart', 'flame', 'medal', 'planet', 'rocket', 'thunderstorm', 'water'];
+    const clubBadge = validBadges.includes(badge) ? badge : 'shield';
 
     const db = admin.firestore();
     const userRef = db.collection('users').doc(userId);
@@ -627,10 +634,12 @@ app.post('/api/club/create', strictLimiter, authenticateFinancialRequest, async 
       newClub = {
         name: name.trim(),
         description: description ? description.trim() : '',
-        badge: badge || 'shield',
+        badge: clubBadge,
         ownerId: userId,
         ownerName: userDoc.data().username || 'Unknown',
         memberCount: 1,
+        maxMembers: 50,
+        minLevel: 1,
         totalWins: 0,
         totalGames: 0,
         totalPoints: 0,
@@ -661,7 +670,7 @@ app.post('/api/club/create', strictLimiter, authenticateFinancialRequest, async 
 
 app.post('/api/club/join', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
-    const { clubId } = req.body;
+    const { clubId, inviteCode } = req.body;
     const userId = req.userId;
 
     if (!clubId) {
@@ -675,10 +684,34 @@ app.post('/api/club/join', strictLimiter, authenticateFinancialRequest, async (r
     await db.runTransaction(async (transaction) => {
       const userDoc = await transaction.get(userRef);
       if (!userDoc.exists) throw new Error('User not found');
-      if (userDoc.data().clubId) throw new Error('Already in a club');
+      
+      const userData = userDoc.data();
+      if (userData.clubId) throw new Error('Already in a club');
 
       const clubDoc = await transaction.get(clubRef);
       if (!clubDoc.exists) throw new Error('Club not found');
+
+      const clubData = clubDoc.data();
+      
+      // Check if club is full
+      const maxMembers = clubData.maxMembers || 50;
+      if (clubData.memberCount >= maxMembers) {
+        throw new Error('Club is full');
+      }
+
+      // Check min level
+      const minLevel = clubData.minLevel || 1;
+      const userLevel = userData.level || 1;
+      if (userLevel < minLevel) {
+        throw new Error(`You must be at least level ${minLevel} to join this club`);
+      }
+
+      // Check if private and verify invite code
+      if (clubData.isPrivate) {
+        if (!inviteCode || inviteCode.toUpperCase() !== clubData.inviteCode) {
+          throw new Error('Invalid invite code for private club');
+        }
+      }
 
       transaction.update(clubRef, {
         memberCount: admin.firestore.FieldValue.increment(1)
@@ -739,9 +772,22 @@ app.post('/api/club/update-settings', strictLimiter, authenticateFinancialReques
     const { clubId, name, description, maxMembers, isPrivate, minLevel, badge } = req.body;
     const userId = req.userId;
 
-    if (!clubId || !name || name.trim().length < 3) {
-      return res.status(400).json({ error: 'Invalid club data' });
+    if (!clubId || !name || typeof name !== 'string' || name.trim().length < 3 || name.trim().length > 30) {
+      return res.status(400).json({ error: 'Invalid club name. Must be 3-30 characters.' });
     }
+
+    if (description && (typeof description !== 'string' || description.length > 200)) {
+      return res.status(400).json({ error: 'Description too long (max 200 characters).' });
+    }
+
+    let parsedMaxMembers = parseInt(maxMembers) || 50;
+    if (parsedMaxMembers < 1 || parsedMaxMembers > 100) parsedMaxMembers = 50; // Add upper limit for security
+
+    let parsedMinLevel = parseInt(minLevel) || 1;
+    if (parsedMinLevel < 1 || parsedMinLevel > 100) parsedMinLevel = 1;
+
+    const validBadges = ['shield', 'flag', 'trophy', 'star', 'ribbon', 'diamond', 'skull', 'flash', 'heart', 'flame', 'medal', 'planet', 'rocket', 'thunderstorm', 'water'];
+    const clubBadge = validBadges.includes(badge) ? badge : 'shield';
 
     const db = admin.firestore();
     const clubRef = db.collection('clubs').doc(clubId);
@@ -758,10 +804,10 @@ app.post('/api/club/update-settings', strictLimiter, authenticateFinancialReques
       transaction.update(clubRef, {
         name: name.trim(),
         description: description ? description.trim() : '',
-        maxMembers: parseInt(maxMembers) || 50,
+        maxMembers: parsedMaxMembers,
         isPrivate: !!isPrivate,
-        minLevel: parseInt(minLevel) || 1,
-        badge: badge || 'shield',
+        minLevel: parsedMinLevel,
+        badge: clubBadge,
         updatedAt: new Date().toISOString()
       });
     });
