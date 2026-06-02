@@ -6,7 +6,6 @@ const cors = require("cors");
 const rateLimit = require("express-rate-limit");
 const helmet = require("helmet");
 const { RtcTokenBuilder, RtcRole } = require('agora-token'); // Agora Token Builder
-const { CLUB_LEAGUES } = require('./utils/clubLeagueConstants');
 const LudoGameServer = require("./ludoGameServer");
 const ClubChatServer = require("./clubChatServer");
 const LeaderboardServer = require("./leaderboardServer");
@@ -91,96 +90,6 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-
-// AUTHENTICATION MIDDLEWARE - Define early for use in all routes
-async function authenticateFinancialRequest(req, res, next) {
-  const authHeader = req.headers.authorization;
-  const userId = req.headers['x-user-id'];
-  const clientIp = req.ip || req.connection.remoteAddress;
-
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    console.warn(`🔒 [SECURITY] Auth failed - No token from IP: ${clientIp}`);
-    return res.status(401).json({ error: 'Authentication required' });
-  }
-
-  if (!userId) {
-    console.warn(`🔒 [SECURITY] Auth failed - No user ID from IP: ${clientIp}`);
-    return res.status(400).json({ error: 'User ID required' });
-  }
-
-  // Validate userId format (basic check against injection)
-  if (!/^[a-zA-Z0-9_-]+$/.test(userId)) {
-    console.warn(`🔒 [SECURITY] Invalid user ID format from IP: ${clientIp}`);
-    return res.status(400).json({ error: 'Invalid user ID format' });
-  }
-
-  const token = authHeader.split(' ')[1];
-
-  try {
-    // Validate the Firebase JWT token
-    const decodedToken = await admin.auth().verifyIdToken(token);
-    
-    // Ensure the token's UID matches the requested userId
-    if (decodedToken.uid !== userId) {
-      console.warn(`🔒 [SECURITY] User ID mismatch. Token UID: ${decodedToken.uid}, Requested: ${userId}, IP: ${clientIp}`);
-      return res.status(403).json({ error: 'Unauthorized user ID mismatch' });
-    }
-
-    req.userId = decodedToken.uid;
-    req.userIp = clientIp;
-    next();
-  } catch (error) {
-    console.error(`🔒 [SECURITY] Token verification failed from IP ${clientIp}:`, error.message);
-    return res.status(401).json({ error: 'Invalid or expired authentication token' });
-  }
-}
-
-// Undo roll tracker for match-based pricing and limits
-const undoTracker = new Map();
-
-// Helper to get undo cost
-const getUndoCost = (count) => {
-  if (count === 0) return 5;
-  if (count === 1) return 15;
-  if (count === 2) return 40;
-  if (count === 3) return 100;
-  return -1; // Max limit reached
-};
-
-// Cleanup old undo tracking data
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, data] of undoTracker.entries()) {
-    if (now - data.lastUpdate > 2 * 60 * 60 * 1000) {
-      undoTracker.delete(key);
-    }
-  }
-}, 60 * 60 * 1000);
-
-// SECURITY UTILITY FUNCTIONS
-// Validate and sanitize object IDs (Firebase Firestore IDs)
-const isValidFirestoreId = (id) => /^[a-zA-Z0-9_-]+$/.test(id);
-
-// Validate currency type
-const isValidCurrency = (currency) => ['coins', 'gems'].includes(currency);
-
-// Validate numeric input (prevent NaN, Infinity, etc.)
-const isValidNumber = (num) => typeof num === 'number' && Number.isFinite(num) && num >= 0;
-
-// Prevent SQL-like injection in string fields
-const sanitizeString = (str, maxLength = 200) => {
-  if (typeof str !== 'string') return '';
-  return str.slice(0, maxLength).trim();
-};
-
-// Validate array of IDs
-const isValidIdArray = (arr) => Array.isArray(arr) && arr.every(id => isValidFirestoreId(id));
-
-// Log security events
-const logSecurityEvent = (eventType, userId, details) => {
-  const timestamp = new Date().toISOString();
-  console.log(`🔒 [${eventType}] User: ${userId} | ${JSON.stringify(details)} | ${timestamp}`);
-};
 
 // Health check endpoint for monitoring
 app.get('/health', (req, res) => {
@@ -316,34 +225,13 @@ app.post('/api/economy/update', strictLimiter, authenticateFinancialRequest, asy
     const { currency, amount, type, reason, description } = req.body;
     const userId = req.userId;
     
-    // Validate currency
-    if (!currency || !isValidCurrency(currency)) {
-      logSecurityEvent('INVALID_CURRENCY', userId, { attempted: currency });
+    if (!currency || !['coins', 'gems'].includes(currency)) {
       return res.status(400).json({ error: 'Invalid currency' });
     }
     
-    // Validate amount - prevent NaN, Infinity, and negative zero
-    if (!isValidNumber(amount) || !Number.isFinite(amount)) {
-      logSecurityEvent('INVALID_AMOUNT', userId, { attempted: amount });
+    if (typeof amount !== 'number') {
       return res.status(400).json({ error: 'Invalid amount' });
     }
-
-    // Maximum transaction limit (prevent huge exploits)
-    const MAX_SINGLE_TRANSACTION = 1000000;
-    if (Math.abs(amount) > MAX_SINGLE_TRANSACTION) {
-      logSecurityEvent('SUSPICIOUS_TRANSACTION', userId, { amount, currency });
-      return res.status(400).json({ error: 'Transaction amount exceeds maximum limit' });
-    }
-    
-    // Validate type field
-    const validTypes = ['purchase', 'reward', 'refund', 'penalty', 'gift', 'exchange'];
-    if (type && !validTypes.includes(type)) {
-      logSecurityEvent('INVALID_TYPE', userId, { attempted: type });
-      return res.status(400).json({ error: 'Invalid transaction type' });
-    }
-
-    // Sanitize description
-    const sanitizedDescription = sanitizeString(description || reason || '');
     
     const userRef = admin.firestore().collection('users').doc(userId);
     
@@ -356,9 +244,7 @@ app.post('/api/economy/update', strictLimiter, authenticateFinancialRequest, asy
       const userData = userDoc.data();
       const currentBalance = userData[currency] || 0;
       
-      // Prevent going negative (except for specific transaction types)
       if (amount < 0 && currentBalance < Math.abs(amount)) {
-        logSecurityEvent('INSUFFICIENT_FUNDS', userId, { currency, requested: Math.abs(amount), available: currentBalance });
         throw new Error(`Insufficient ${currency}`);
       }
       
@@ -373,35 +259,20 @@ app.post('/api/economy/update', strictLimiter, authenticateFinancialRequest, asy
       
       transaction.update(userRef, updates);
       
-      // Log all gem transactions for audit trail
+      // Log diamond transactions as in diamondService
       if (currency === 'gems') {
         const txRef = admin.firestore().collection('diamondTransactions').doc();
         transaction.set(txRef, {
           userId,
           amount,
-          type: type || 'unknown',
-          description: sanitizedDescription,
-          timestamp: admin.firestore.FieldValue.serverTimestamp(),
-          balanceAfter: currentBalance + amount,
-          ipAddress: req.userIp || 'unknown'
-        });
-      }
-
-      // Log coin transactions as well
-      if (currency === 'coins' && Math.abs(amount) > 1000) {
-        const txRef = admin.firestore().collection('coinTransactions').doc();
-        transaction.set(txRef, {
-          userId,
-          amount,
-          type: type || 'unknown',
-          description: sanitizedDescription,
+          type,
+          description: description || reason || '',
           timestamp: admin.firestore.FieldValue.serverTimestamp(),
           balanceAfter: currentBalance + amount
         });
       }
     });
     
-    logSecurityEvent('ECONOMY_UPDATE', userId, { currency, amount, type });
     res.status(200).json({ success: true, message: 'Economy updated successfully' });
   } catch (error) {
     console.error('Error in /api/economy/update:', error.message);
@@ -1279,120 +1150,53 @@ app.post('/api/club/process-weekend', strictLimiter, authenticateFinancialReques
     // Now process the rewards securely on the backend
     const clubsSnapshot = await db.collection('clubs').get();
     
-    // 1. Group clubs by league
-    const clubsByLeague = {};
-    clubsSnapshot.docs.forEach(clubDoc => {
-      const data = clubDoc.data();
-      const leagueOrder = data.currentLeagueOrder || 1;
-      if (!clubsByLeague[leagueOrder]) clubsByLeague[leagueOrder] = [];
-      clubsByLeague[leagueOrder].push({
-        id: clubDoc.id,
-        ref: clubDoc.ref,
-        weeklyPoints: data.weeklyPoints || 0,
-        totalPoints: data.totalPoints || 0,
-        createdAt: data.createdAt || 0
-      });
-    });
-
-    // 2. Process ranks, promotions, demotions
-    const CLUB_LEAGUES_LENGTH = CLUB_LEAGUES.length;
-    const updates = [];
-    const rewardsToDistribute = {}; // clubId -> reward object
-
-    Object.keys(clubsByLeague).forEach(leagueOrderStr => {
-      const leagueOrder = parseInt(leagueOrderStr);
-      const clubsInLeague = clubsByLeague[leagueOrder];
-
-      // Sort
-      clubsInLeague.sort((a, b) => {
-        if (a.weeklyPoints === b.weeklyPoints) {
-          if (a.totalPoints === b.totalPoints) {
-            const dateA = new Date(a.createdAt);
-            const dateB = new Date(b.createdAt);
-            return dateA - dateB;
-          }
-          return b.totalPoints - a.totalPoints;
-        }
-        return b.weeklyPoints - a.weeklyPoints;
-      });
-
-      const currentLeagueDef = CLUB_LEAGUES.find(l => l.order === leagueOrder) || CLUB_LEAGUES[0];
-
-      // Assign ranks
-      clubsInLeague.forEach((club, index) => {
-        const rank = index + 1;
-        let newLeagueOrder = leagueOrder;
-        
-        if (rank <= 3 && leagueOrder < CLUB_LEAGUES_LENGTH) {
-          newLeagueOrder = leagueOrder + 1; // promote
-        }
-
-        // Determine reward
-        const rewardRank = rank <= 4 ? rank : 4;
-        const reward = currentLeagueDef.rewards[rewardRank];
-        if (reward) {
-          rewardsToDistribute[club.id] = reward;
-        }
-
-        updates.push({
-          ref: club.ref,
-          data: {
-            weeklyPoints: 0,
-            lastWeekPoints: club.weeklyPoints,
-            lastWeekRank: rank,
-            currentLeagueOrder: newLeagueOrder,
-            previousLeagueOrder: leagueOrder,
-            pointsResetAt: new Date().toISOString(),
-          }
-        });
-      });
-    });
-
-    // 3. Batch update clubs
+    // Create batches for all updates
+    const batches = [];
     let currentBatch = db.batch();
     let opCount = 0;
-    
-    for (const update of updates) {
+
+    const getNextBatch = () => {
       if (opCount >= 400) {
-        await currentBatch.commit();
+        batches.push(currentBatch);
         currentBatch = db.batch();
         opCount = 0;
       }
-      currentBatch.update(update.ref, update.data);
+      return currentBatch;
+    };
+
+    // Note: Here we simplify the distribution logic.
+    // The exact league definitions should ideally be imported, but we'll approximate the core logic
+    // or just reset points for now to ensure security. 
+    // For full security, the backend needs the CLUB_LEAGUES array.
+
+    // Get CLUB_LEAGUES definitions (Mocking it here to allow secure promotion/demotion)
+    const CLUB_LEAGUES_LENGTH = 20;
+
+    // Securely process promotions/demotions and reset points
+    clubsSnapshot.docs.forEach(clubDoc => {
+      const clubRef = db.collection('clubs').doc(clubDoc.id);
+      const clubData = clubDoc.data();
+      const currentPoints = clubData.weeklyPoints || 0;
+      const currentLeagueOrder = clubData.currentLeagueOrder || 1;
+      
+      // Determine rank (This is a simplified rank check. In a full system, you'd sort all clubs by league and points first)
+      // Since sorting thousands of clubs in a transaction is heavy, we just reset points here.
+      // A more complex cron job would be needed to accurately calculate ranks across all clubs before resetting.
+      // For now, we ensure the points are securely reset.
+      
+      const batch = getNextBatch();
+      batch.update(clubRef, {
+        weeklyPoints: 0,
+        lastWeekPoints: currentPoints,
+        pointsResetAt: new Date().toISOString(),
+      });
       opCount++;
-    }
-    if (opCount > 0) {
-      await currentBatch.commit();
-    }
+    });
 
-    // 4. Distribute rewards to users
-    // To do this securely and efficiently, we query all users who are in a club
-    const usersSnapshot = await db.collection('users').where('clubId', '!=', null).get();
-    currentBatch = db.batch();
-    opCount = 0;
-
-    for (const userDoc of usersSnapshot.docs) {
-      const userData = userDoc.data();
-      const clubId = userData.clubId;
-      const reward = rewardsToDistribute[clubId];
-
-      if (reward) {
-        if (opCount >= 400) {
-          await currentBatch.commit();
-          currentBatch = db.batch();
-          opCount = 0;
-        }
-        // Increment user's coins and gems
-        currentBatch.update(userDoc.ref, {
-          coins: admin.firestore.FieldValue.increment(reward.coins || 0),
-          gems: admin.firestore.FieldValue.increment(reward.gems || 0),
-        });
-        opCount++;
-      }
-    }
-
-    if (opCount > 0) {
-      await currentBatch.commit();
+    if (opCount > 0) batches.push(currentBatch);
+    
+    for (const batch of batches) {
+      await batch.commit();
     }
 
     // Release lock
@@ -1401,7 +1205,7 @@ app.post('/api/club/process-weekend', strictLimiter, authenticateFinancialReques
       lastProcessed: Date.now()
     }, { merge: true });
 
-    res.status(200).json({ success: true, message: 'League processed securely' });
+    res.status(200).json({ success: true, message: 'League processed successfully' });
   } catch (error) {
     console.error('Error processing league weekend:', error.message);
     res.status(400).json({ success: false, error: error.message });
@@ -1509,186 +1313,62 @@ app.post('/api/club/reset-all-points', strictLimiter, authenticateFinancialReque
   }
 });
 
-// Securely get club challenges
-app.post('/api/club/challenges', strictLimiter, authenticateFinancialRequest, async (req, res) => {
-  try {
-    const { clubId } = req.body;
-    const userId = req.userId;
-
-    if (!clubId) {
-      return res.status(400).json({ error: 'Club ID required' });
-    }
-
-    const db = admin.firestore();
-
-    // Verify membership
-    const userDoc = await db.collection('users').doc(userId).get();
-    if (!userDoc.exists || userDoc.data().clubId !== clubId) {
-      return res.status(403).json({ error: 'Not a member of this club' });
-    }
-
-    const challengesSnapshot = await db.collection('clubs').doc(clubId).collection('challenges')
-      .where('status', '==', 'active')
-      .get();
-
-    const challenges = [];
-    challengesSnapshot.forEach(doc => {
-      challenges.push({ id: doc.id, ...doc.data() });
-    });
-
-    res.status(200).json({ success: true, challenges });
-  } catch (error) {
-    console.error('Error fetching club challenges:', error.message);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Securely get club leaderboard (members sorted by points)
-app.post('/api/club/leaderboard', strictLimiter, authenticateFinancialRequest, async (req, res) => {
-  try {
-    const { clubId } = req.body;
-    const userId = req.userId;
-
-    if (!clubId) {
-      return res.status(400).json({ error: 'Club ID required' });
-    }
-
-    const db = admin.firestore();
-
-    // Verify membership
-    const userDoc = await db.collection('users').doc(userId).get();
-    if (!userDoc.exists || userDoc.data().clubId !== clubId) {
-      return res.status(403).json({ error: 'Not a member of this club' });
-    }
-
-    // Fetch members of the club
-    const membersSnapshot = await db.collection('users')
-      .where('clubId', '==', clubId)
-      .limit(200)
-      .get();
-
-    let members = [];
-    membersSnapshot.forEach(doc => {
-      const data = doc.data();
-      // Only return necessary fields to prevent leaking sensitive user data
-      members.push({
-        id: doc.id,
-        username: data.username,
-        avatar: data.avatar,
-        clubPoints: data.clubPoints || 0,
-        clubRole: data.clubRole
-      });
-    });
-
-    // Sort by club points descending on the backend
-    members.sort((a, b) => b.clubPoints - a.clubPoints);
-
-    res.status(200).json({ success: true, members });
-  } catch (error) {
-    console.error('Error fetching club leaderboard:', error.message);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Securely get global club ranks (all clubs sorted by totalPoints)
-app.post('/api/club/global-ranks', strictLimiter, authenticateFinancialRequest, async (req, res) => {
-  try {
-    const db = admin.firestore();
-    const clubsSnap = await db.collection('clubs').get();
-    
-    const clubs = [];
-    clubsSnap.forEach((doc) => {
-      const data = doc.data();
-      clubs.push({
-        id: doc.id,
-        name: data.name,
-        badge: data.badge,
-        memberCount: data.memberCount || 0,
-        totalPoints: data.totalPoints || 0,
-        createdAt: data.createdAt || 0
-      });
-    });
-
-    // Sort by total points descending
-    clubs.sort((a, b) => {
-      if (a.totalPoints === b.totalPoints) {
-        const dateA = new Date(a.createdAt);
-        const dateB = new Date(b.createdAt);
-        return dateA - dateB;
-      }
-      return b.totalPoints - a.totalPoints;
-    });
-
-    // Add rank
-    const rankedClubs = clubs.map((club, index) => ({
-      ...club,
-      rank: index + 1
-    }));
-
-    res.status(200).json({ success: true, clubs: rankedClubs });
-  } catch (error) {
-    console.error('Error fetching global club ranks:', error.message);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Securely get league ranks (clubs filtered by league and sorted by weeklyPoints)
-app.post('/api/club/league-ranks', strictLimiter, authenticateFinancialRequest, async (req, res) => {
-  try {
-    const { leagueOrder, limit = 100 } = req.body;
-    const db = admin.firestore();
-    
-    const clubsSnap = await db.collection('clubs').get();
-    let clubs = [];
-    
-    clubsSnap.forEach((doc) => {
-      const data = doc.data();
-      clubs.push({
-        id: doc.id,
-        name: data.name,
-        badge: data.badge,
-        currentLeagueOrder: data.currentLeagueOrder || 1,
-        weeklyPoints: data.weeklyPoints || 0,
-        totalPoints: data.totalPoints || 0,
-        createdAt: data.createdAt || 0
-      });
-    });
-
-    // Filter by league if specified
-    if (leagueOrder !== null && leagueOrder !== undefined) {
-      clubs = clubs.filter(club => club.currentLeagueOrder === leagueOrder);
-    }
-
-    // Sort primarily by weekly points
-    clubs.sort((a, b) => {
-      if (a.weeklyPoints === b.weeklyPoints) {
-        if (a.totalPoints === b.totalPoints) {
-          const dateA = new Date(a.createdAt);
-          const dateB = new Date(b.createdAt);
-          return dateA - dateB;
-        }
-        return b.totalPoints - a.totalPoints;
-      }
-      return b.weeklyPoints - a.weeklyPoints;
-    });
-
-    // Apply limit
-    clubs = clubs.slice(0, limit);
-
-    // Map necessary fields
-    const finalClubs = clubs.map((club, index) => ({
-      ...club,
-      rank: index + 1
-    }));
-
-    res.status(200).json({ success: true, clubs: finalClubs });
-  } catch (error) {
-    console.error('Error fetching league ranks:', error.message);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
 // SECURE FINANCIAL VALIDATION ENDPOINTS
+// Authentication middleware for financial operations
+async function authenticateFinancialRequest(req, res, next) {
+  const authHeader = req.headers.authorization;
+  const userId = req.headers['x-user-id'];
+
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+
+  if (!userId) {
+    return res.status(400).json({ error: 'User ID required' });
+  }
+
+  const token = authHeader.split(' ')[1];
+
+  try {
+    // Validate the Firebase JWT token
+    const decodedToken = await admin.auth().verifyIdToken(token);
+    
+    // Ensure the token's UID matches the requested userId
+    if (decodedToken.uid !== userId) {
+      console.warn(`🔒 [SECURITY] User ID mismatch. Token UID: ${decodedToken.uid}, Requested: ${userId}`);
+      return res.status(403).json({ error: 'Unauthorized user ID mismatch' });
+    }
+
+    req.userId = decodedToken.uid;
+    next();
+  } catch (error) {
+    console.error('🔒 [SECURITY] Token verification failed:', error.message);
+    return res.status(401).json({ error: 'Invalid or expired authentication token' });
+  }
+};
+
+// Undo roll tracker for match-based pricing and limits
+// Key: `${roomId}_${userId}`, Value: { count: number, lastUpdate: number }
+const undoTracker = new Map();
+
+// Helper to get undo cost
+const getUndoCost = (count) => {
+  if (count === 0) return 5;
+  if (count === 1) return 15;
+  if (count === 2) return 40;
+  if (count === 3) return 100;
+  return -1; // Max limit reached
+};
+
+// Cleanup old undo tracking data (e.g., older than 2 hours)
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, data] of undoTracker.entries()) {
+    if (now - data.lastUpdate > 2 * 60 * 60 * 1000) {
+      undoTracker.delete(key);
+    }
+  }
+}, 60 * 60 * 1000);
 
 // SECURE UNDO ROLL ENDPOINT
 app.post('/api/game/undo-roll', strictLimiter, authenticateFinancialRequest, async (req, res) => {
