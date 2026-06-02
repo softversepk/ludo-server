@@ -13,8 +13,14 @@ const ALLOWED_EMOJIS = [
 ];
 
 class GameChatServer {
-  constructor(io) {
+  constructor(io, roomsMap, userSockets) {
     this.io = io;
+    this.rooms = roomsMap || {};
+    this.userSockets = userSockets || {};
+    
+    // Rate limiting trackers
+    this.messageRateLimit = new Map(); // userId -> { count, lastTime }
+    this.emojiRateLimit = new Map(); // userId -> { count, lastTime }
   }
 
   /**
@@ -57,10 +63,57 @@ class GameChatServer {
     try {
       if (!roomId || !userId || !message) return;
 
+      // RATE LIMITING
+      const now = Date.now();
+      const userRate = this.messageRateLimit.get(userId) || { count: 0, lastTime: now };
+      if (now - userRate.lastTime > 5000) {
+        userRate.count = 0; // Reset every 5 seconds
+        userRate.lastTime = now;
+      }
+      userRate.count++;
+      this.messageRateLimit.set(userId, userRate);
+      
+      if (userRate.count > 5) {
+        console.warn(`[GAME CHAT] Rate limit exceeded for user ${userId} in messages`);
+        return; // Drop message if more than 5 per 5 seconds
+      }
+
+      // SECURITY: Validate that the socket sending the message actually belongs to userId
+      const expectedSocketId = this.userSockets[userId];
+      if (!expectedSocketId || socket.id !== expectedSocketId) {
+        console.warn(`[GAME CHAT] Security Alert: Socket ${socket.id} attempted to send message as ${userId}`);
+        return;
+      }
+
+      // SECURITY: Validate that the user is actually in the room
+      const room = this.rooms[roomId];
+      if (!room) {
+        console.warn(`[GAME CHAT] Security Alert: Room ${roomId} not found for chat`);
+        return;
+      }
+      
+      if (!room.players || !room.players[userId]) {
+        console.warn(`[GAME CHAT] Security Alert: User ${userId} attempted to chat in room ${roomId} without being a member`);
+        return;
+      }
+
+      // Enforce message length limit (e.g., max 200 chars)
+      if (message.length > 200) {
+        message = message.substring(0, 200);
+      }
+
       // Clean message (remove emojis) and trim
       const cleanedMessage = this._removeEmojisFromText(message).trim();
       
-      if (!cleanedMessage) {
+      // Prevent XSS / HTML tags by escaping basic characters
+      const sanitizedMessage = cleanedMessage
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+      
+      if (!sanitizedMessage) {
         return; // Empty message after cleaning
       }
 
@@ -68,7 +121,7 @@ class GameChatServer {
         id: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
         userId,
         username: username || 'Player',
-        message: cleanedMessage,
+        message: sanitizedMessage,
         timestamp: Date.now()
       };
 
@@ -90,6 +143,40 @@ class GameChatServer {
   handleSendEmoji(socket, { roomId, userId, emoji }) {
     try {
       if (!roomId || !userId || !emoji) return;
+
+      // RATE LIMITING
+      const now = Date.now();
+      const emojiRate = this.emojiRateLimit.get(userId) || { count: 0, lastTime: now };
+      if (now - emojiRate.lastTime > 5000) {
+        emojiRate.count = 0; // Reset every 5 seconds
+        emojiRate.lastTime = now;
+      }
+      emojiRate.count++;
+      this.emojiRateLimit.set(userId, emojiRate);
+      
+      if (emojiRate.count > 10) {
+        console.warn(`[GAME CHAT] Rate limit exceeded for user ${userId} in emojis`);
+        return; // Drop emoji if more than 10 per 5 seconds
+      }
+
+      // SECURITY: Validate that the socket sending the emoji actually belongs to userId
+      const expectedSocketId = this.userSockets[userId];
+      if (!expectedSocketId || socket.id !== expectedSocketId) {
+        console.warn(`[GAME CHAT] Security Alert: Socket ${socket.id} attempted to send emoji as ${userId}`);
+        return;
+      }
+
+      // SECURITY: Validate that the user is actually in the room
+      const room = this.rooms[roomId];
+      if (!room) {
+        console.warn(`[GAME CHAT] Security Alert: Room ${roomId} not found for emoji`);
+        return;
+      }
+      
+      if (!room.players || !room.players[userId]) {
+        console.warn(`[GAME CHAT] Security Alert: User ${userId} attempted to send emoji in room ${roomId} without being a member`);
+        return;
+      }
 
       // Validate emoji securely on backend
       if (!this._validateEmoji(emoji)) {
