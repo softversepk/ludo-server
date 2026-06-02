@@ -21,12 +21,15 @@ try {
       // Parse the JSON string from environment variable (useful for Railway)
       const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
       admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount)
+        credential: admin.credential.cert(serviceAccount),
+        databaseURL: process.env.FIREBASE_DATABASE_URL || "https://ecommerce-1eeb2-default-rtdb.firebaseio.com"
       });
       console.log("✅ Firebase Admin initialized with Service Account from ENV");
     } else {
       // Fallback: This expects GOOGLE_APPLICATION_CREDENTIALS env var pointing to a file path
-      admin.initializeApp();
+      admin.initializeApp({
+        databaseURL: process.env.FIREBASE_DATABASE_URL || "https://ecommerce-1eeb2-default-rtdb.firebaseio.com"
+      });
       console.log("✅ Firebase Admin initialized (Default)");
     }
   }
@@ -2359,6 +2362,82 @@ app.post('/api/friends/request/reject', strictLimiter, authenticateFinancialRequ
     res.json({ success: true });
   } catch (error) {
     console.error('[SERVER-FRIENDS] Error rejecting request:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Send game invite (Secure Backend Logic)
+app.post('/api/game/invite/send', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { fromUserId, toUserId, gameData, roomCode } = req.body;
+    
+    if (fromUserId !== req.userId) {
+      return res.status(403).json({ success: false, error: 'Unauthorized user' });
+    }
+
+    if (!toUserId || !gameData || !roomCode) {
+      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    }
+
+    const db = admin.database();
+    const invitesRef = db.ref(`gameInvites/${toUserId}`);
+    const newInviteRef = invitesRef.push();
+    
+    const inviteData = {
+      id: newInviteRef.key,
+      fromUserId,
+      fromUsername: gameData.fromUsername,
+      fromAvatar: gameData.fromAvatar || 'default',
+      toUserId,
+      gameType: gameData.gameType,
+      gameName: gameData.gameName,
+      betAmount: gameData.betAmount,
+      roomCode,
+      gameMode: gameData.gameMode || 'classic',
+      status: 'pending',
+      timestamp: admin.database.ServerValue.TIMESTAMP,
+      expiresAt: Date.now() + 60000, // 60 seconds
+    };
+    
+    await newInviteRef.set(inviteData);
+    
+    // Auto-expire after 60 seconds
+    setTimeout(async () => {
+      try {
+        const snapshot = await newInviteRef.once('value');
+        if (snapshot.exists() && snapshot.val().status === 'pending') {
+          await newInviteRef.update({ status: 'expired' });
+          await newInviteRef.remove();
+        }
+      } catch (err) {
+        console.error('Error auto-expiring invite:', err);
+      }
+    }, 60000);
+
+    // Optional notification
+    try {
+      const firestore = admin.firestore();
+      await firestore.collection('notifications').add({
+        userId: toUserId,
+        type: 'game_invite',
+        fromUserId,
+        title: 'Game Invite',
+        message: `${gameData.fromUsername || 'A friend'} invited you to play ${gameData.gameName || 'a game'}`,
+        read: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        data: {
+          inviteId: newInviteRef.key,
+          roomCode,
+          gameType: gameData.gameType
+        }
+      });
+    } catch (notifErr) {
+      console.error('[SERVER-GAME-INVITE] Error creating notification:', notifErr);
+    }
+
+    res.json({ success: true, inviteId: newInviteRef.key, roomCode });
+  } catch (error) {
+    console.error('[SERVER-GAME-INVITE] Error sending invite:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
