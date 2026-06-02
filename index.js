@@ -1313,6 +1313,87 @@ app.post('/api/club/reset-all-points', strictLimiter, authenticateFinancialReque
   }
 });
 
+// Securely get club challenges
+app.post('/api/club/challenges', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { clubId } = req.body;
+    const userId = req.userId;
+
+    if (!clubId) {
+      return res.status(400).json({ error: 'Club ID required' });
+    }
+
+    const db = admin.firestore();
+
+    // Verify membership
+    const userDoc = await db.collection('users').doc(userId).get();
+    if (!userDoc.exists || userDoc.data().clubId !== clubId) {
+      return res.status(403).json({ error: 'Not a member of this club' });
+    }
+
+    const challengesSnapshot = await db.collection('clubs').doc(clubId).collection('challenges')
+      .where('status', '==', 'active')
+      .get();
+
+    const challenges = [];
+    challengesSnapshot.forEach(doc => {
+      challenges.push({ id: doc.id, ...doc.data() });
+    });
+
+    res.status(200).json({ success: true, challenges });
+  } catch (error) {
+    console.error('Error fetching club challenges:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Securely get club leaderboard (members sorted by points)
+app.post('/api/club/leaderboard', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { clubId } = req.body;
+    const userId = req.userId;
+
+    if (!clubId) {
+      return res.status(400).json({ error: 'Club ID required' });
+    }
+
+    const db = admin.firestore();
+
+    // Verify membership
+    const userDoc = await db.collection('users').doc(userId).get();
+    if (!userDoc.exists || userDoc.data().clubId !== clubId) {
+      return res.status(403).json({ error: 'Not a member of this club' });
+    }
+
+    // Fetch members of the club
+    const membersSnapshot = await db.collection('users')
+      .where('clubId', '==', clubId)
+      .limit(200)
+      .get();
+
+    let members = [];
+    membersSnapshot.forEach(doc => {
+      const data = doc.data();
+      // Only return necessary fields to prevent leaking sensitive user data
+      members.push({
+        id: doc.id,
+        username: data.username,
+        avatar: data.avatar,
+        clubPoints: data.clubPoints || 0,
+        clubRole: data.clubRole
+      });
+    });
+
+    // Sort by club points descending on the backend
+    members.sort((a, b) => b.clubPoints - a.clubPoints);
+
+    res.status(200).json({ success: true, members });
+  } catch (error) {
+    console.error('Error fetching club leaderboard:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // SECURE FINANCIAL VALIDATION ENDPOINTS
 // Authentication middleware for financial operations
 async function authenticateFinancialRequest(req, res, next) {
