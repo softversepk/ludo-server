@@ -92,6 +92,96 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 
+// AUTHENTICATION MIDDLEWARE - Define early for use in all routes
+async function authenticateFinancialRequest(req, res, next) {
+  const authHeader = req.headers.authorization;
+  const userId = req.headers['x-user-id'];
+  const clientIp = req.ip || req.connection.remoteAddress;
+
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    console.warn(`🔒 [SECURITY] Auth failed - No token from IP: ${clientIp}`);
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+
+  if (!userId) {
+    console.warn(`🔒 [SECURITY] Auth failed - No user ID from IP: ${clientIp}`);
+    return res.status(400).json({ error: 'User ID required' });
+  }
+
+  // Validate userId format (basic check against injection)
+  if (!/^[a-zA-Z0-9_-]+$/.test(userId)) {
+    console.warn(`🔒 [SECURITY] Invalid user ID format from IP: ${clientIp}`);
+    return res.status(400).json({ error: 'Invalid user ID format' });
+  }
+
+  const token = authHeader.split(' ')[1];
+
+  try {
+    // Validate the Firebase JWT token
+    const decodedToken = await admin.auth().verifyIdToken(token);
+    
+    // Ensure the token's UID matches the requested userId
+    if (decodedToken.uid !== userId) {
+      console.warn(`🔒 [SECURITY] User ID mismatch. Token UID: ${decodedToken.uid}, Requested: ${userId}, IP: ${clientIp}`);
+      return res.status(403).json({ error: 'Unauthorized user ID mismatch' });
+    }
+
+    req.userId = decodedToken.uid;
+    req.userIp = clientIp;
+    next();
+  } catch (error) {
+    console.error(`🔒 [SECURITY] Token verification failed from IP ${clientIp}:`, error.message);
+    return res.status(401).json({ error: 'Invalid or expired authentication token' });
+  }
+}
+
+// Undo roll tracker for match-based pricing and limits
+const undoTracker = new Map();
+
+// Helper to get undo cost
+const getUndoCost = (count) => {
+  if (count === 0) return 5;
+  if (count === 1) return 15;
+  if (count === 2) return 40;
+  if (count === 3) return 100;
+  return -1; // Max limit reached
+};
+
+// Cleanup old undo tracking data
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, data] of undoTracker.entries()) {
+    if (now - data.lastUpdate > 2 * 60 * 60 * 1000) {
+      undoTracker.delete(key);
+    }
+  }
+}, 60 * 60 * 1000);
+
+// SECURITY UTILITY FUNCTIONS
+// Validate and sanitize object IDs (Firebase Firestore IDs)
+const isValidFirestoreId = (id) => /^[a-zA-Z0-9_-]+$/.test(id);
+
+// Validate currency type
+const isValidCurrency = (currency) => ['coins', 'gems'].includes(currency);
+
+// Validate numeric input (prevent NaN, Infinity, etc.)
+const isValidNumber = (num) => typeof num === 'number' && Number.isFinite(num) && num >= 0;
+
+// Prevent SQL-like injection in string fields
+const sanitizeString = (str, maxLength = 200) => {
+  if (typeof str !== 'string') return '';
+  return str.slice(0, maxLength).trim();
+};
+
+// Validate array of IDs
+const isValidIdArray = (arr) => Array.isArray(arr) && arr.every(id => isValidFirestoreId(id));
+
+// Log security events
+const logSecurityEvent = (eventType, userId, details) => {
+  const timestamp = new Date().toISOString();
+  console.log(`🔒 [${eventType}] User: ${userId} | ${JSON.stringify(details)} | ${timestamp}`);
+};
+
 // Health check endpoint for monitoring
 app.get('/health', (req, res) => {
   res.json({
@@ -226,13 +316,34 @@ app.post('/api/economy/update', strictLimiter, authenticateFinancialRequest, asy
     const { currency, amount, type, reason, description } = req.body;
     const userId = req.userId;
     
-    if (!currency || !['coins', 'gems'].includes(currency)) {
+    // Validate currency
+    if (!currency || !isValidCurrency(currency)) {
+      logSecurityEvent('INVALID_CURRENCY', userId, { attempted: currency });
       return res.status(400).json({ error: 'Invalid currency' });
     }
     
-    if (typeof amount !== 'number') {
+    // Validate amount - prevent NaN, Infinity, and negative zero
+    if (!isValidNumber(amount) || !Number.isFinite(amount)) {
+      logSecurityEvent('INVALID_AMOUNT', userId, { attempted: amount });
       return res.status(400).json({ error: 'Invalid amount' });
     }
+
+    // Maximum transaction limit (prevent huge exploits)
+    const MAX_SINGLE_TRANSACTION = 1000000;
+    if (Math.abs(amount) > MAX_SINGLE_TRANSACTION) {
+      logSecurityEvent('SUSPICIOUS_TRANSACTION', userId, { amount, currency });
+      return res.status(400).json({ error: 'Transaction amount exceeds maximum limit' });
+    }
+    
+    // Validate type field
+    const validTypes = ['purchase', 'reward', 'refund', 'penalty', 'gift', 'exchange'];
+    if (type && !validTypes.includes(type)) {
+      logSecurityEvent('INVALID_TYPE', userId, { attempted: type });
+      return res.status(400).json({ error: 'Invalid transaction type' });
+    }
+
+    // Sanitize description
+    const sanitizedDescription = sanitizeString(description || reason || '');
     
     const userRef = admin.firestore().collection('users').doc(userId);
     
@@ -245,7 +356,9 @@ app.post('/api/economy/update', strictLimiter, authenticateFinancialRequest, asy
       const userData = userDoc.data();
       const currentBalance = userData[currency] || 0;
       
+      // Prevent going negative (except for specific transaction types)
       if (amount < 0 && currentBalance < Math.abs(amount)) {
+        logSecurityEvent('INSUFFICIENT_FUNDS', userId, { currency, requested: Math.abs(amount), available: currentBalance });
         throw new Error(`Insufficient ${currency}`);
       }
       
@@ -260,20 +373,35 @@ app.post('/api/economy/update', strictLimiter, authenticateFinancialRequest, asy
       
       transaction.update(userRef, updates);
       
-      // Log diamond transactions as in diamondService
+      // Log all gem transactions for audit trail
       if (currency === 'gems') {
         const txRef = admin.firestore().collection('diamondTransactions').doc();
         transaction.set(txRef, {
           userId,
           amount,
-          type,
-          description: description || reason || '',
+          type: type || 'unknown',
+          description: sanitizedDescription,
+          timestamp: admin.firestore.FieldValue.serverTimestamp(),
+          balanceAfter: currentBalance + amount,
+          ipAddress: req.userIp || 'unknown'
+        });
+      }
+
+      // Log coin transactions as well
+      if (currency === 'coins' && Math.abs(amount) > 1000) {
+        const txRef = admin.firestore().collection('coinTransactions').doc();
+        transaction.set(txRef, {
+          userId,
+          amount,
+          type: type || 'unknown',
+          description: sanitizedDescription,
           timestamp: admin.firestore.FieldValue.serverTimestamp(),
           balanceAfter: currentBalance + amount
         });
       }
     });
     
+    logSecurityEvent('ECONOMY_UPDATE', userId, { currency, amount, type });
     res.status(200).json({ success: true, message: 'Economy updated successfully' });
   } catch (error) {
     console.error('Error in /api/economy/update:', error.message);
@@ -1561,61 +1689,6 @@ app.post('/api/club/league-ranks', strictLimiter, authenticateFinancialRequest, 
 });
 
 // SECURE FINANCIAL VALIDATION ENDPOINTS
-// Authentication middleware for financial operations
-async function authenticateFinancialRequest(req, res, next) {
-  const authHeader = req.headers.authorization;
-  const userId = req.headers['x-user-id'];
-
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Authentication required' });
-  }
-
-  if (!userId) {
-    return res.status(400).json({ error: 'User ID required' });
-  }
-
-  const token = authHeader.split(' ')[1];
-
-  try {
-    // Validate the Firebase JWT token
-    const decodedToken = await admin.auth().verifyIdToken(token);
-    
-    // Ensure the token's UID matches the requested userId
-    if (decodedToken.uid !== userId) {
-      console.warn(`🔒 [SECURITY] User ID mismatch. Token UID: ${decodedToken.uid}, Requested: ${userId}`);
-      return res.status(403).json({ error: 'Unauthorized user ID mismatch' });
-    }
-
-    req.userId = decodedToken.uid;
-    next();
-  } catch (error) {
-    console.error('🔒 [SECURITY] Token verification failed:', error.message);
-    return res.status(401).json({ error: 'Invalid or expired authentication token' });
-  }
-};
-
-// Undo roll tracker for match-based pricing and limits
-// Key: `${roomId}_${userId}`, Value: { count: number, lastUpdate: number }
-const undoTracker = new Map();
-
-// Helper to get undo cost
-const getUndoCost = (count) => {
-  if (count === 0) return 5;
-  if (count === 1) return 15;
-  if (count === 2) return 40;
-  if (count === 3) return 100;
-  return -1; // Max limit reached
-};
-
-// Cleanup old undo tracking data (e.g., older than 2 hours)
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, data] of undoTracker.entries()) {
-    if (now - data.lastUpdate > 2 * 60 * 60 * 1000) {
-      undoTracker.delete(key);
-    }
-  }
-}, 60 * 60 * 1000);
 
 // SECURE UNDO ROLL ENDPOINT
 app.post('/api/game/undo-roll', strictLimiter, authenticateFinancialRequest, async (req, res) => {
