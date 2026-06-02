@@ -2968,6 +2968,36 @@ io.on("connection", (socket) => {
         return;
       }
       
+      // SECURITY: Air Hockey Validation
+      if (room.mode === "airhockey" || room.gameMode === "airhockey") {
+        if (gameState && gameState.strikers) {
+          // Strikers limits - limit to valid bounds (e.g. 0 to window width/height logic on client, but we cap to reasonable maximums)
+          // Client bounds typically: x: 0-400, y: 0-800
+          for (let striker in gameState.strikers) {
+             let st = gameState.strikers[striker];
+             if (st && typeof st.x === 'number') st.x = Math.max(0, Math.min(st.x, 800)); // Cap limits
+             if (st && typeof st.y === 'number') st.y = Math.max(0, Math.min(st.y, 1600)); // Cap limits
+          }
+        }
+      }
+      
+      // SECURITY: Snake vs Snake Validation
+      if (room.mode === "snake_vs_snake" || room.gameMode === "snake_vs_snake") {
+        if (gameState && gameState.snakes) {
+          // Block reviving a dead snake via payload hacking
+          if (room.gameState && room.gameState.snakes) {
+             for (let player in room.gameState.snakes) {
+               if (room.gameState.snakes[player] && !room.gameState.snakes[player].alive) {
+                 if (gameState.snakes[player] && gameState.snakes[player].alive) {
+                   console.warn(`[SECURITY] Blocked hacked snake revive for ${player} in room ${roomCode}`);
+                   gameState.snakes[player].alive = false; // Force back to dead
+                 }
+               }
+             }
+          }
+        }
+      }
+      
       // If it's a bot's turn (or was just a bot's turn), only the host can update the state
       if (room.gameState && room.gameState.currentPlayer) {
         const previousPlayerId = room.players[room.gameState.currentPlayer]?.uid;
@@ -3210,6 +3240,15 @@ io.on("connection", (socket) => {
         // Since Air Hockey and Snake are physics-heavy and client-authoritative for game over,
         // we process rewards here when the client first reports a winner.
         if (!alreadyOver && room.betAmount) {
+          
+          // SECURITY: Ensure that only the HOST can declare the final game over state for AirHockey/Snake
+          // This prevents a losing client from sending a hacked payload declaring themselves the winner
+          if (room.host && senderId && room.host !== senderId && !room.isTeamMode && room.mode !== 'classic' && room.mode !== 'quick') {
+             console.warn(`[SECURITY] Blocked hacked game over state from non-host ${senderId} in room ${roomCode}`);
+             if (callback) callback({ success: false, error: "Only host can declare game over" });
+             return;
+          }
+          
           try {
             const RewardServiceServer = require('./rewardServiceServer');
             const winnerKey = gameState.winner; // "player1", "player2", or "draw"
@@ -3280,9 +3319,21 @@ io.on("connection", (socket) => {
   socket.on("paddle_move", ({ roomCode, playerKey, x, y }) => {
     const room = rooms[roomCode];
     if (room && room.gameState && room.gameState.strikers) {
-      room.gameState.strikers[playerKey] = { x, y };
+      // SECURITY: Validate sender is the actual player
+      const senderId = Object.keys(userSockets).find(key => userSockets[key] === socket.id);
+      const targetUid = room.gameState.players ? room.gameState.players[playerKey] : null;
+      if (senderId && targetUid && senderId !== targetUid) {
+         console.warn(`[SECURITY] Blocked hacked paddle move: ${senderId} tried to move ${playerKey}`);
+         return;
+      }
+
+      // SECURITY: Cap limits to prevent moving striker off-screen to cheat
+      let safeX = typeof x === 'number' ? Math.max(0, Math.min(x, 800)) : 0;
+      let safeY = typeof y === 'number' ? Math.max(0, Math.min(y, 1600)) : 0;
+
+      room.gameState.strikers[playerKey] = { x: safeX, y: safeY };
       // Broadcast only the paddle move to others to save bandwidth
-      socket.to(roomCode).emit("opponent_paddle_move", { playerKey, x, y });
+      socket.to(roomCode).emit("opponent_paddle_move", { playerKey, x: safeX, y: safeY });
     }
   });
 
@@ -3329,9 +3380,20 @@ io.on("connection", (socket) => {
     const { roomCode, playerKey, angle } = data;
     const room = rooms[roomCode];
     if (room && room.gameState && room.gameState.snakes) {
-      if (angle !== undefined) room.gameState.snakes[playerKey].angle = angle;
+      // SECURITY: Validate sender is the actual player
+      const senderId = Object.keys(userSockets).find(key => userSockets[key] === socket.id);
+      const targetUid = room.gameState.players ? room.gameState.players[playerKey] : null;
+      if (senderId && targetUid && senderId !== targetUid) {
+         console.warn(`[SECURITY] Blocked hacked snake turn: ${senderId} tried to steer ${playerKey}`);
+         return;
+      }
+      
+      // SECURITY: Validate angle
+      let safeAngle = typeof angle === 'number' ? angle : 0;
+      
+      if (angle !== undefined) room.gameState.snakes[playerKey].angle = safeAngle;
       // Broadcast steering to the other player
-      socket.to(roomCode).emit("snake_turn", data);
+      socket.to(roomCode).emit("snake_turn", { ...data, angle: safeAngle });
     }
   });
 
