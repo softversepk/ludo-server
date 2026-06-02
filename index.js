@@ -1048,6 +1048,12 @@ app.post('/api/club/award-points', strictLimiter, authenticateFinancialRequest, 
     const { points = 10 } = req.body;
     const userId = req.userId;
 
+    // Secure the points awarded to avoid hacking
+    const awardedPoints = parseInt(points, 10);
+    if (isNaN(awardedPoints) || awardedPoints <= 0 || awardedPoints > 20) {
+       return res.status(400).json({ error: 'Invalid points amount' });
+    }
+
     const db = admin.firestore();
     const userRef = db.collection('users').doc(userId);
 
@@ -1062,22 +1068,29 @@ app.post('/api/club/award-points', strictLimiter, authenticateFinancialRequest, 
 
       if (!clubId) throw new Error('User is not in a club');
 
+      // Check last awarded time to prevent spamming points via API
+      const now = Date.now();
+      if (userData.lastClubPointAwarded && (now - userData.lastClubPointAwarded < 10000)) {
+         throw new Error('Please wait before claiming more points');
+      }
+
       // Update user's club points
       transaction.update(userRef, {
-        clubPoints: admin.firestore.FieldValue.increment(points),
-        totalClubPoints: admin.firestore.FieldValue.increment(points)
+        clubPoints: admin.firestore.FieldValue.increment(awardedPoints),
+        totalClubPoints: admin.firestore.FieldValue.increment(awardedPoints),
+        lastClubPointAwarded: now
       });
 
       // Update club's total points and weekly points
       const clubRef = db.collection('clubs').doc(clubId);
       transaction.update(clubRef, {
-        totalPoints: admin.firestore.FieldValue.increment(points),
-        weeklyPoints: admin.firestore.FieldValue.increment(points),
+        totalPoints: admin.firestore.FieldValue.increment(awardedPoints),
+        weeklyPoints: admin.firestore.FieldValue.increment(awardedPoints),
         lastUpdated: new Date().toISOString()
       });
     });
 
-    res.status(200).json({ success: true, points, clubId, message: `+${points} Club Points!` });
+    res.status(200).json({ success: true, points: awardedPoints, clubId, message: `+${awardedPoints} Club Points!` });
   } catch (error) {
     console.error('Error awarding club points:', error.message);
     res.status(400).json({ success: false, error: error.message });
@@ -1086,9 +1099,22 @@ app.post('/api/club/award-points', strictLimiter, authenticateFinancialRequest, 
 
 app.post('/api/club/process-weekend', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
-    // Only allow an admin/system user to run this, or run it once safely.
-    // Since frontend triggers it when it detects the timer ending, we'll use a global lock.
+    const userId = req.userId;
     const db = admin.firestore();
+
+    // Verify if the user is authorized (Super Admin or System)
+    // To prevent malicious users from triggering the weekend process
+    const userDoc = await db.collection('users').doc(userId).get();
+    if (!userDoc.exists) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    const userData = userDoc.data();
+    if (userData.role !== 'admin' && userData.role !== 'superadmin' && !userData.isSystemAdmin) {
+       // Just silently skip if they are not admin, but return success to avoid frontend errors
+       console.warn(`Unauthorized attempt to process weekend by user ${userId}`);
+       return res.status(200).json({ success: true, message: 'Skipped processing (unauthorized)' });
+    }
+
     const lockRef = db.collection('system').doc('league_processing');
     
     let processStarted = false;
@@ -1191,13 +1217,14 @@ app.post('/api/club/reset-all-points', strictLimiter, authenticateFinancialReque
     const userId = req.userId;
     const db = admin.firestore();
 
-    // Verify user is system admin or has permission to perform global reset
-    // For now we allow owners to trigger it for their own testing/functionality based on frontend logic, 
-    // but in a production environment this should be restricted to a Super Admin.
-    
     const userDoc = await db.collection('users').doc(userId).get();
     if (!userDoc.exists) {
       return res.status(404).json({ error: 'User not found' });
+    }
+
+    const userData = userDoc.data();
+    if (userData.role !== 'admin' && userData.role !== 'superadmin' && !userData.isSystemAdmin) {
+       return res.status(403).json({ error: 'Forbidden: You do not have permission to reset all points' });
     }
 
     const clubsSnapshot = await db.collection('clubs').get();
