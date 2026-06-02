@@ -21,15 +21,12 @@ try {
       // Parse the JSON string from environment variable (useful for Railway)
       const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
       admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount),
-        databaseURL: process.env.FIREBASE_DATABASE_URL || "https://ecommerce-1eeb2-default-rtdb.firebaseio.com"
+        credential: admin.credential.cert(serviceAccount)
       });
       console.log("✅ Firebase Admin initialized with Service Account from ENV");
     } else {
       // Fallback: This expects GOOGLE_APPLICATION_CREDENTIALS env var pointing to a file path
-      admin.initializeApp({
-        databaseURL: process.env.FIREBASE_DATABASE_URL || "https://ecommerce-1eeb2-default-rtdb.firebaseio.com"
-      });
+      admin.initializeApp();
       console.log("✅ Firebase Admin initialized (Default)");
     }
   }
@@ -2366,82 +2363,6 @@ app.post('/api/friends/request/reject', strictLimiter, authenticateFinancialRequ
   }
 });
 
-// Send game invite (Secure Backend Logic)
-app.post('/api/game/invite/send', strictLimiter, authenticateFinancialRequest, async (req, res) => {
-  try {
-    const { fromUserId, toUserId, gameData, roomCode } = req.body;
-    
-    if (fromUserId !== req.userId) {
-      return res.status(403).json({ success: false, error: 'Unauthorized user' });
-    }
-
-    if (!toUserId || !gameData || !roomCode) {
-      return res.status(400).json({ success: false, error: 'Missing required fields' });
-    }
-
-    const db = admin.database();
-    const invitesRef = db.ref(`gameInvites/${toUserId}`);
-    const newInviteRef = invitesRef.push();
-    
-    const inviteData = {
-      id: newInviteRef.key,
-      fromUserId,
-      fromUsername: gameData.fromUsername,
-      fromAvatar: gameData.fromAvatar || 'default',
-      toUserId,
-      gameType: gameData.gameType,
-      gameName: gameData.gameName,
-      betAmount: gameData.betAmount,
-      roomCode,
-      gameMode: gameData.gameMode || 'classic',
-      status: 'pending',
-      timestamp: admin.database.ServerValue.TIMESTAMP,
-      expiresAt: Date.now() + 60000, // 60 seconds
-    };
-    
-    await newInviteRef.set(inviteData);
-    
-    // Auto-expire after 60 seconds
-    setTimeout(async () => {
-      try {
-        const snapshot = await newInviteRef.once('value');
-        if (snapshot.exists() && snapshot.val().status === 'pending') {
-          await newInviteRef.update({ status: 'expired' });
-          await newInviteRef.remove();
-        }
-      } catch (err) {
-        console.error('Error auto-expiring invite:', err);
-      }
-    }, 60000);
-
-    // Optional notification
-    try {
-      const firestore = admin.firestore();
-      await firestore.collection('notifications').add({
-        userId: toUserId,
-        type: 'game_invite',
-        fromUserId,
-        title: 'Game Invite',
-        message: `${gameData.fromUsername || 'A friend'} invited you to play ${gameData.gameName || 'a game'}`,
-        read: false,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        data: {
-          inviteId: newInviteRef.key,
-          roomCode,
-          gameType: gameData.gameType
-        }
-      });
-    } catch (notifErr) {
-      console.error('[SERVER-GAME-INVITE] Error creating notification:', notifErr);
-    }
-
-    res.json({ success: true, inviteId: newInviteRef.key, roomCode });
-  } catch (error) {
-    console.error('[SERVER-GAME-INVITE] Error sending invite:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
 // Remove friend
 app.post('/api/friends/remove', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
@@ -2476,83 +2397,6 @@ app.post('/api/friends/remove', strictLimiter, authenticateFinancialRequest, asy
     res.json({ success: true });
   } catch (error) {
     console.error('[SERVER-FRIENDS] Error removing friend:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Send friend chat message (Secure Backend Logic)
-app.post('/api/friends/chat/send', strictLimiter, authenticateFinancialRequest, async (req, res) => {
-  try {
-    const { senderId, receiverId, message } = req.body;
-    
-    // Authorization check
-    if (senderId !== req.userId) {
-      return res.status(403).json({ success: false, error: 'Unauthorized user' });
-    }
-    
-    if (!message || !message.trim()) {
-      return res.status(400).json({ success: false, error: 'Message cannot be empty' });
-    }
-
-    const db = admin.firestore();
-    const chatRoomId = [senderId, receiverId].sort().join("_");
-    const chatRoomRef = db.collection('friendChats').doc(chatRoomId);
-    
-    const chatRoomDoc = await chatRoomRef.get();
-    
-    if (chatRoomDoc.exists) {
-      await chatRoomRef.update({
-        lastMessage: message.trim(),
-        lastMessageTime: admin.firestore.FieldValue.serverTimestamp(),
-        lastSenderId: senderId,
-        [`unreadCount_${receiverId}`]: admin.firestore.FieldValue.increment(1)
-      });
-    } else {
-      await chatRoomRef.set({
-        participants: [senderId, receiverId],
-        lastMessage: message.trim(),
-        lastMessageTime: admin.firestore.FieldValue.serverTimestamp(),
-        lastSenderId: senderId,
-        [`unreadCount_${senderId}`]: 0,
-        [`unreadCount_${receiverId}`]: 1,
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
-      }, { merge: true });
-    }
-    
-    // Add message to messages subcollection
-    await chatRoomRef.collection('messages').add({
-      senderId,
-      receiverId,
-      message: message.trim(),
-      timestamp: admin.firestore.FieldValue.serverTimestamp(),
-      read: false
-    });
-    
-    // Optional: create notification
-    try {
-      const senderDoc = await db.collection('users').doc(senderId).get();
-      const senderName = senderDoc.exists ? senderDoc.data().username || 'A friend' : 'A friend';
-      
-      await db.collection('notifications').add({
-        userId: receiverId,
-        type: 'chat_message',
-        fromUserId: senderId,
-        title: 'New Message',
-        message: `${senderName} sent you a message`,
-        read: false,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        data: {
-          chatRoomId,
-          senderId
-        }
-      });
-    } catch (notifError) {
-      console.error('[SERVER-FRIENDS-CHAT] Error creating notification:', notifError);
-    }
-    
-    res.json({ success: true });
-  } catch (error) {
-    console.error('[SERVER-FRIENDS-CHAT] Error sending message:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
