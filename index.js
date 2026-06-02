@@ -6,6 +6,7 @@ const cors = require("cors");
 const rateLimit = require("express-rate-limit");
 const helmet = require("helmet");
 const { RtcTokenBuilder, RtcRole } = require('agora-token'); // Agora Token Builder
+const { CLUB_LEAGUES } = require('./utils/clubLeagueConstants');
 const LudoGameServer = require("./ludoGameServer");
 const ClubChatServer = require("./clubChatServer");
 const LeaderboardServer = require("./leaderboardServer");
@@ -1150,53 +1151,120 @@ app.post('/api/club/process-weekend', strictLimiter, authenticateFinancialReques
     // Now process the rewards securely on the backend
     const clubsSnapshot = await db.collection('clubs').get();
     
-    // Create batches for all updates
-    const batches = [];
+    // 1. Group clubs by league
+    const clubsByLeague = {};
+    clubsSnapshot.docs.forEach(clubDoc => {
+      const data = clubDoc.data();
+      const leagueOrder = data.currentLeagueOrder || 1;
+      if (!clubsByLeague[leagueOrder]) clubsByLeague[leagueOrder] = [];
+      clubsByLeague[leagueOrder].push({
+        id: clubDoc.id,
+        ref: clubDoc.ref,
+        weeklyPoints: data.weeklyPoints || 0,
+        totalPoints: data.totalPoints || 0,
+        createdAt: data.createdAt || 0
+      });
+    });
+
+    // 2. Process ranks, promotions, demotions
+    const CLUB_LEAGUES_LENGTH = CLUB_LEAGUES.length;
+    const updates = [];
+    const rewardsToDistribute = {}; // clubId -> reward object
+
+    Object.keys(clubsByLeague).forEach(leagueOrderStr => {
+      const leagueOrder = parseInt(leagueOrderStr);
+      const clubsInLeague = clubsByLeague[leagueOrder];
+
+      // Sort
+      clubsInLeague.sort((a, b) => {
+        if (a.weeklyPoints === b.weeklyPoints) {
+          if (a.totalPoints === b.totalPoints) {
+            const dateA = new Date(a.createdAt);
+            const dateB = new Date(b.createdAt);
+            return dateA - dateB;
+          }
+          return b.totalPoints - a.totalPoints;
+        }
+        return b.weeklyPoints - a.weeklyPoints;
+      });
+
+      const currentLeagueDef = CLUB_LEAGUES.find(l => l.order === leagueOrder) || CLUB_LEAGUES[0];
+
+      // Assign ranks
+      clubsInLeague.forEach((club, index) => {
+        const rank = index + 1;
+        let newLeagueOrder = leagueOrder;
+        
+        if (rank <= 3 && leagueOrder < CLUB_LEAGUES_LENGTH) {
+          newLeagueOrder = leagueOrder + 1; // promote
+        }
+
+        // Determine reward
+        const rewardRank = rank <= 4 ? rank : 4;
+        const reward = currentLeagueDef.rewards[rewardRank];
+        if (reward) {
+          rewardsToDistribute[club.id] = reward;
+        }
+
+        updates.push({
+          ref: club.ref,
+          data: {
+            weeklyPoints: 0,
+            lastWeekPoints: club.weeklyPoints,
+            lastWeekRank: rank,
+            currentLeagueOrder: newLeagueOrder,
+            previousLeagueOrder: leagueOrder,
+            pointsResetAt: new Date().toISOString(),
+          }
+        });
+      });
+    });
+
+    // 3. Batch update clubs
     let currentBatch = db.batch();
     let opCount = 0;
-
-    const getNextBatch = () => {
+    
+    for (const update of updates) {
       if (opCount >= 400) {
-        batches.push(currentBatch);
+        await currentBatch.commit();
         currentBatch = db.batch();
         opCount = 0;
       }
-      return currentBatch;
-    };
-
-    // Note: Here we simplify the distribution logic.
-    // The exact league definitions should ideally be imported, but we'll approximate the core logic
-    // or just reset points for now to ensure security. 
-    // For full security, the backend needs the CLUB_LEAGUES array.
-
-    // Get CLUB_LEAGUES definitions (Mocking it here to allow secure promotion/demotion)
-    const CLUB_LEAGUES_LENGTH = 20;
-
-    // Securely process promotions/demotions and reset points
-    clubsSnapshot.docs.forEach(clubDoc => {
-      const clubRef = db.collection('clubs').doc(clubDoc.id);
-      const clubData = clubDoc.data();
-      const currentPoints = clubData.weeklyPoints || 0;
-      const currentLeagueOrder = clubData.currentLeagueOrder || 1;
-      
-      // Determine rank (This is a simplified rank check. In a full system, you'd sort all clubs by league and points first)
-      // Since sorting thousands of clubs in a transaction is heavy, we just reset points here.
-      // A more complex cron job would be needed to accurately calculate ranks across all clubs before resetting.
-      // For now, we ensure the points are securely reset.
-      
-      const batch = getNextBatch();
-      batch.update(clubRef, {
-        weeklyPoints: 0,
-        lastWeekPoints: currentPoints,
-        pointsResetAt: new Date().toISOString(),
-      });
+      currentBatch.update(update.ref, update.data);
       opCount++;
-    });
+    }
+    if (opCount > 0) {
+      await currentBatch.commit();
+    }
 
-    if (opCount > 0) batches.push(currentBatch);
-    
-    for (const batch of batches) {
-      await batch.commit();
+    // 4. Distribute rewards to users
+    // To do this securely and efficiently, we query all users who are in a club
+    const usersSnapshot = await db.collection('users').where('clubId', '!=', null).get();
+    currentBatch = db.batch();
+    opCount = 0;
+
+    for (const userDoc of usersSnapshot.docs) {
+      const userData = userDoc.data();
+      const clubId = userData.clubId;
+      const reward = rewardsToDistribute[clubId];
+
+      if (reward) {
+        if (opCount >= 400) {
+          await currentBatch.commit();
+          currentBatch = db.batch();
+          opCount = 0;
+        }
+        // Increment user's coins and gems
+        currentBatch.update(userDoc.ref, {
+          coins: admin.firestore.FieldValue.increment(reward.coins || 0),
+          gems: admin.firestore.FieldValue.increment(reward.gems || 0),
+        });
+        opCount++;
+      }
+    }
+
+    if (opCount > 0) {
+      await currentBatch.commit();
     }
 
     // Release lock
@@ -1205,7 +1273,7 @@ app.post('/api/club/process-weekend', strictLimiter, authenticateFinancialReques
       lastProcessed: Date.now()
     }, { merge: true });
 
-    res.status(200).json({ success: true, message: 'League processed successfully' });
+    res.status(200).json({ success: true, message: 'League processed securely' });
   } catch (error) {
     console.error('Error processing league weekend:', error.message);
     res.status(400).json({ success: false, error: error.message });
@@ -1390,6 +1458,104 @@ app.post('/api/club/leaderboard', strictLimiter, authenticateFinancialRequest, a
     res.status(200).json({ success: true, members });
   } catch (error) {
     console.error('Error fetching club leaderboard:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Securely get global club ranks (all clubs sorted by totalPoints)
+app.post('/api/club/global-ranks', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const db = admin.firestore();
+    const clubsSnap = await db.collection('clubs').get();
+    
+    const clubs = [];
+    clubsSnap.forEach((doc) => {
+      const data = doc.data();
+      clubs.push({
+        id: doc.id,
+        name: data.name,
+        badge: data.badge,
+        memberCount: data.memberCount || 0,
+        totalPoints: data.totalPoints || 0,
+        createdAt: data.createdAt || 0
+      });
+    });
+
+    // Sort by total points descending
+    clubs.sort((a, b) => {
+      if (a.totalPoints === b.totalPoints) {
+        const dateA = new Date(a.createdAt);
+        const dateB = new Date(b.createdAt);
+        return dateA - dateB;
+      }
+      return b.totalPoints - a.totalPoints;
+    });
+
+    // Add rank
+    const rankedClubs = clubs.map((club, index) => ({
+      ...club,
+      rank: index + 1
+    }));
+
+    res.status(200).json({ success: true, clubs: rankedClubs });
+  } catch (error) {
+    console.error('Error fetching global club ranks:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Securely get league ranks (clubs filtered by league and sorted by weeklyPoints)
+app.post('/api/club/league-ranks', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { leagueOrder, limit = 100 } = req.body;
+    const db = admin.firestore();
+    
+    const clubsSnap = await db.collection('clubs').get();
+    let clubs = [];
+    
+    clubsSnap.forEach((doc) => {
+      const data = doc.data();
+      clubs.push({
+        id: doc.id,
+        name: data.name,
+        badge: data.badge,
+        currentLeagueOrder: data.currentLeagueOrder || 1,
+        weeklyPoints: data.weeklyPoints || 0,
+        totalPoints: data.totalPoints || 0,
+        createdAt: data.createdAt || 0
+      });
+    });
+
+    // Filter by league if specified
+    if (leagueOrder !== null && leagueOrder !== undefined) {
+      clubs = clubs.filter(club => club.currentLeagueOrder === leagueOrder);
+    }
+
+    // Sort primarily by weekly points
+    clubs.sort((a, b) => {
+      if (a.weeklyPoints === b.weeklyPoints) {
+        if (a.totalPoints === b.totalPoints) {
+          const dateA = new Date(a.createdAt);
+          const dateB = new Date(b.createdAt);
+          return dateA - dateB;
+        }
+        return b.totalPoints - a.totalPoints;
+      }
+      return b.weeklyPoints - a.weeklyPoints;
+    });
+
+    // Apply limit
+    clubs = clubs.slice(0, limit);
+
+    // Map necessary fields
+    const finalClubs = clubs.map((club, index) => ({
+      ...club,
+      rank: index + 1
+    }));
+
+    res.status(200).json({ success: true, clubs: finalClubs });
+  } catch (error) {
+    console.error('Error fetching league ranks:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
