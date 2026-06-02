@@ -141,7 +141,12 @@ app.post('/api/user/update-profile', profileLimiter, authenticateFinancialReques
 
     // Secure Avatar Update
     if (updates.avatar !== undefined) {
-      validUpdates.avatar = String(updates.avatar);
+      const avatarStr = String(updates.avatar);
+      // Basic validation to prevent completely arbitrary URLs if needed
+      // Or we can just sanitize the URL
+      if (avatarStr === 'default' || avatarStr.startsWith('http')) {
+        validUpdates.avatar = avatarStr;
+      }
     }
 
     // Secure Settings Update
