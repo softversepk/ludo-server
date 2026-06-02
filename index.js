@@ -2474,6 +2474,39 @@ app.post('/api/chat/send', strictLimiter, authenticateFinancialRequest, async (r
   }
 });
 
+// Secure Friend Chat Mark as Read
+app.post('/api/chat/mark-read', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { userId, friendId } = req.body;
+    
+    if (userId !== req.userId) {
+      return res.status(403).json({ success: false, error: 'Unauthorized user' });
+    }
+
+    if (!friendId) {
+      return res.status(400).json({ success: false, error: 'Friend ID required' });
+    }
+
+    const db = admin.firestore();
+    
+    const sortedIds = [userId, friendId].sort();
+    const chatRoomId = `${sortedIds[0]}_${sortedIds[1]}`;
+    
+    const chatRoomRef = db.collection('friendChats').doc(chatRoomId);
+    
+    await chatRoomRef.set({
+      participants: [userId, friendId],
+      [`unreadCount_${userId}`]: 0,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(), // Only sets if doc does not exist
+    }, { merge: true });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[SERVER-CHAT] Error marking messages as read:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Secure Game Invite Endpoint
 app.post('/api/game-invite/send', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
