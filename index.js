@@ -2401,6 +2401,83 @@ app.post('/api/friends/remove', strictLimiter, authenticateFinancialRequest, asy
   }
 });
 
+// Send friend chat message (Secure Backend Logic)
+app.post('/api/friends/chat/send', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { senderId, receiverId, message } = req.body;
+    
+    // Authorization check
+    if (senderId !== req.userId) {
+      return res.status(403).json({ success: false, error: 'Unauthorized user' });
+    }
+    
+    if (!message || !message.trim()) {
+      return res.status(400).json({ success: false, error: 'Message cannot be empty' });
+    }
+
+    const db = admin.firestore();
+    const chatRoomId = [senderId, receiverId].sort().join("_");
+    const chatRoomRef = db.collection('friendChats').doc(chatRoomId);
+    
+    const chatRoomDoc = await chatRoomRef.get();
+    
+    if (chatRoomDoc.exists) {
+      await chatRoomRef.update({
+        lastMessage: message.trim(),
+        lastMessageTime: admin.firestore.FieldValue.serverTimestamp(),
+        lastSenderId: senderId,
+        [`unreadCount_${receiverId}`]: admin.firestore.FieldValue.increment(1)
+      });
+    } else {
+      await chatRoomRef.set({
+        participants: [senderId, receiverId],
+        lastMessage: message.trim(),
+        lastMessageTime: admin.firestore.FieldValue.serverTimestamp(),
+        lastSenderId: senderId,
+        [`unreadCount_${senderId}`]: 0,
+        [`unreadCount_${receiverId}`]: 1,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+    }
+    
+    // Add message to messages subcollection
+    await chatRoomRef.collection('messages').add({
+      senderId,
+      receiverId,
+      message: message.trim(),
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      read: false
+    });
+    
+    // Optional: create notification
+    try {
+      const senderDoc = await db.collection('users').doc(senderId).get();
+      const senderName = senderDoc.exists ? senderDoc.data().username || 'A friend' : 'A friend';
+      
+      await db.collection('notifications').add({
+        userId: receiverId,
+        type: 'chat_message',
+        fromUserId: senderId,
+        title: 'New Message',
+        message: `${senderName} sent you a message`,
+        read: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        data: {
+          chatRoomId,
+          senderId
+        }
+      });
+    } catch (notifError) {
+      console.error('[SERVER-FRIENDS-CHAT] Error creating notification:', notifError);
+    }
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[SERVER-FRIENDS-CHAT] Error sending message:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Server status endpoint
 app.get('/api/status', (req, res) => {
   res.json({
