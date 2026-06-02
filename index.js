@@ -150,8 +150,24 @@ app.post('/api/user/update-profile', profileLimiter, authenticateFinancialReques
     }
 
     // Secure Settings Update
-    if (updates.settings !== undefined) {
-      validUpdates.settings = updates.settings;
+    if (updates.settings !== undefined && typeof updates.settings === 'object') {
+      const allowedSettings = ['soundEnabled', 'vibrationEnabled', 'notifications', 'hideOnlineStatus', 'privateAccount', 'theme', 'tokenSkin', 'diceSkin', 'airHockeySkin', 'boardTheme'];
+      validUpdates.settings = {};
+      
+      // Preserve existing settings
+      const userDoc = await userRef.get();
+      if (userDoc.exists && userDoc.data().settings) {
+        validUpdates.settings = { ...userDoc.data().settings };
+      }
+
+      // Only allow specific boolean/string settings to be updated
+      for (const key of allowedSettings) {
+        if (updates.settings[key] !== undefined) {
+          if (typeof updates.settings[key] === 'boolean' || typeof updates.settings[key] === 'string') {
+            validUpdates.settings[key] = updates.settings[key];
+          }
+        }
+      }
     }
 
     if (Object.keys(validUpdates).length > 0) {
