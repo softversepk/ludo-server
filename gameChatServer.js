@@ -92,7 +92,15 @@ class GameChatServer {
         return;
       }
       
-      if (!room.players || !room.players[userId]) {
+      // Ensure the room players list exists before checking
+      if (!room.players) {
+         console.warn(`[GAME CHAT] Security Alert: Room ${roomId} has no players data structure`);
+         return;
+      }
+
+      // Check if user is in room.players or in room.gameState.players (some game modes might store differently)
+      const isPlayerInRoom = room.players[userId] || (room.gameState && room.gameState.players && room.gameState.players[userId]);
+      if (!isPlayerInRoom) {
         console.warn(`[GAME CHAT] Security Alert: User ${userId} attempted to chat in room ${roomId} without being a member`);
         return;
       }
@@ -173,7 +181,15 @@ class GameChatServer {
         return;
       }
       
-      if (!room.players || !room.players[userId]) {
+      // Ensure the room players list exists before checking
+      if (!room.players) {
+         console.warn(`[GAME CHAT] Security Alert: Room ${roomId} has no players data structure`);
+         return;
+      }
+
+      // Check if user is in room.players or in room.gameState.players (some game modes might store differently)
+      const isPlayerInRoom = room.players[userId] || (room.gameState && room.gameState.players && room.gameState.players[userId]);
+      if (!isPlayerInRoom) {
         console.warn(`[GAME CHAT] Security Alert: User ${userId} attempted to send emoji in room ${roomId} without being a member`);
         return;
       }
