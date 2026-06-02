@@ -21,12 +21,15 @@ try {
       // Parse the JSON string from environment variable (useful for Railway)
       const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
       admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount)
+        credential: admin.credential.cert(serviceAccount),
+        databaseURL: process.env.FIREBASE_DATABASE_URL || "https://customer-abe40-default-rtdb.firebaseio.com"
       });
       console.log("✅ Firebase Admin initialized with Service Account from ENV");
     } else {
       // Fallback: This expects GOOGLE_APPLICATION_CREDENTIALS env var pointing to a file path
-      admin.initializeApp();
+      admin.initializeApp({
+        databaseURL: process.env.FIREBASE_DATABASE_URL || "https://customer-abe40-default-rtdb.firebaseio.com"
+      });
       console.log("✅ Firebase Admin initialized (Default)");
     }
   }
