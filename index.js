@@ -112,6 +112,8 @@ const profileLimiter = rateLimit({
   }
 });
 
+const CLUB_LEAGUES = require('./utils/clubLeagues');
+
 // USER PROFILE SECURE ENDPOINTS
 app.post('/api/user/update-profile', profileLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
@@ -1100,20 +1102,8 @@ app.post('/api/club/award-points', strictLimiter, authenticateFinancialRequest, 
 app.post('/api/club/process-weekend', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const userId = req.userId;
+    const { leagueId } = req.body;
     const db = admin.firestore();
-
-    // Verify if the user is authorized (Super Admin or System)
-    // To prevent malicious users from triggering the weekend process
-    const userDoc = await db.collection('users').doc(userId).get();
-    if (!userDoc.exists) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-    const userData = userDoc.data();
-    if (userData.role !== 'admin' && userData.role !== 'superadmin' && !userData.isSystemAdmin) {
-       // Just silently skip if they are not admin, but return success to avoid frontend errors
-       console.warn(`Unauthorized attempt to process weekend by user ${userId}`);
-       return res.status(200).json({ success: true, message: 'Skipped processing (unauthorized)' });
-    }
 
     const lockRef = db.collection('system').doc('league_processing');
     
@@ -1125,19 +1115,19 @@ app.post('/api/club/process-weekend', strictLimiter, authenticateFinancialReques
 
       if (lockDoc.exists) {
         const lockData = lockDoc.data();
-        if (lockData.isProcessing && (now - lockData.timestamp < 5 * 60 * 1000)) {
+        if (lockData.isProcessing && (now - lockData.timestamp < 2 * 60 * 1000)) {
           throw new Error('Already processing');
         }
         
-        // Prevent running multiple times in the same hour
-        if (lockData.lastProcessed && (now - lockData.lastProcessed < 60 * 60 * 1000)) {
+        if (leagueId && lockData.lastProcessedLeagueId === leagueId) {
           throw new Error('Already processed this cycle');
         }
       }
 
       transaction.set(lockRef, {
         isProcessing: true,
-        timestamp: now
+        timestamp: now,
+        lastProcessedLeagueId: leagueId || null
       }, { merge: true });
 
       processStarted = true;
@@ -1147,10 +1137,18 @@ app.post('/api/club/process-weekend', strictLimiter, authenticateFinancialReques
       return res.status(200).json({ success: false, message: 'Skipped processing' });
     }
 
-    // Now process the rewards securely on the backend
+    // Process the rewards securely on the backend
     const clubsSnapshot = await db.collection('clubs').get();
     
-    // Create batches for all updates
+    // Group clubs by league
+    const leaguesMap = {};
+    clubsSnapshot.docs.forEach(doc => {
+      const data = doc.data();
+      const order = data.currentLeagueOrder || 1;
+      if (!leaguesMap[order]) leaguesMap[order] = [];
+      leaguesMap[order].push({ id: doc.id, ...data });
+    });
+
     const batches = [];
     let currentBatch = db.batch();
     let opCount = 0;
@@ -1164,34 +1162,98 @@ app.post('/api/club/process-weekend', strictLimiter, authenticateFinancialReques
       return currentBatch;
     };
 
-    // Note: Here we simplify the distribution logic.
-    // The exact league definitions should ideally be imported, but we'll approximate the core logic
-    // or just reset points for now to ensure security. 
-    // For full security, the backend needs the CLUB_LEAGUES array.
+    const clubsToReward = [];
 
-    // Get CLUB_LEAGUES definitions (Mocking it here to allow secure promotion/demotion)
-    const CLUB_LEAGUES_LENGTH = 20;
+    for (let leagueOrder = 1; leagueOrder <= CLUB_LEAGUES.length; leagueOrder++) {
+      if (!leaguesMap[leagueOrder]) continue;
 
-    // Securely process promotions/demotions and reset points
-    clubsSnapshot.docs.forEach(clubDoc => {
-      const clubRef = db.collection('clubs').doc(clubDoc.id);
-      const clubData = clubDoc.data();
-      const currentPoints = clubData.weeklyPoints || 0;
-      const currentLeagueOrder = clubData.currentLeagueOrder || 1;
-      
-      // Determine rank (This is a simplified rank check. In a full system, you'd sort all clubs by league and points first)
-      // Since sorting thousands of clubs in a transaction is heavy, we just reset points here.
-      // A more complex cron job would be needed to accurately calculate ranks across all clubs before resetting.
-      // For now, we ensure the points are securely reset.
-      
-      const batch = getNextBatch();
-      batch.update(clubRef, {
-        weeklyPoints: 0,
-        lastWeekPoints: currentPoints,
-        pointsResetAt: new Date().toISOString(),
+      const clubsInLeague = leaguesMap[leagueOrder];
+      // Sort clubs by weeklyPoints (DESC), then totalPoints (DESC), then createdAt (ASC)
+      clubsInLeague.sort((a, b) => {
+        const pointsA = a.weeklyPoints || 0;
+        const pointsB = b.weeklyPoints || 0;
+        if (pointsA !== pointsB) return pointsB - pointsA;
+        
+        const totalA = a.totalPoints || 0;
+        const totalB = b.totalPoints || 0;
+        if (totalA !== totalB) return totalB - totalA;
+        
+        const dateA = new Date(a.createdAt || 0);
+        const dateB = new Date(b.createdAt || 0);
+        return dateA - dateB;
       });
-      opCount++;
-    });
+
+      const currentLeagueDef = CLUB_LEAGUES[leagueOrder - 1];
+
+      for (let i = 0; i < clubsInLeague.length; i++) {
+        const club = clubsInLeague[i];
+        const rank = i + 1;
+        const clubRef = db.collection('clubs').doc(club.id);
+        
+        let newLeagueOrder = leagueOrder;
+        
+        // Only top 4 get rewards
+        if (rank <= 4 && currentLeagueDef && currentLeagueDef.rewards[rank]) {
+           clubsToReward.push({
+             clubId: club.id,
+             reward: currentLeagueDef.rewards[rank]
+           });
+        }
+        
+        // Promotion (rank 1-3), Demotion/Stay (rank 4+)
+        if (rank <= 3) {
+          newLeagueOrder = Math.min(leagueOrder + 1, CLUB_LEAGUES.length);
+        } else {
+          newLeagueOrder = leagueOrder; // User requested NO DEMOTION
+        }
+        
+        const currentPoints = club.weeklyPoints || 0;
+        
+        const batch = getNextBatch();
+        batch.update(clubRef, {
+          weeklyPoints: 0,
+          lastWeekPoints: currentPoints,
+          pointsResetAt: new Date().toISOString(),
+          currentLeagueOrder: newLeagueOrder,
+          previousLeagueOrder: leagueOrder,
+          lastPromotedAt: (rank <= 3 && newLeagueOrder !== leagueOrder) ? new Date().toISOString() : (club.lastPromotedAt || null),
+          lastDemotedAt: (rank >= 4) ? new Date().toISOString() : (club.lastDemotedAt || null)
+        });
+        opCount++;
+      }
+    }
+
+    // Now distribute rewards to users of winning clubs
+    if (clubsToReward.length > 0) {
+      // Create a map for quick lookup
+      const rewardMap = {};
+      clubsToReward.forEach(c => rewardMap[c.clubId] = c.reward);
+      
+      const winningClubIds = clubsToReward.map(c => c.clubId);
+      
+      // Firestore 'in' query supports max 10 values. Split into chunks of 10.
+      const chunks = [];
+      for (let i = 0; i < winningClubIds.length; i += 10) {
+        chunks.push(winningClubIds.slice(i, i + 10));
+      }
+      
+      for (const chunk of chunks) {
+        const usersSnapshot = await db.collection('users').where('clubId', 'in', chunk).get();
+        usersSnapshot.docs.forEach(userDoc => {
+          const userData = userDoc.data();
+          const clubId = userData.clubId;
+          const reward = rewardMap[clubId];
+          if (reward) {
+            const batch = getNextBatch();
+            batch.update(userDoc.ref, {
+              coins: admin.firestore.FieldValue.increment(reward.coins),
+              gems: admin.firestore.FieldValue.increment(reward.gems)
+            });
+            opCount++;
+          }
+        });
+      }
+    }
 
     if (opCount > 0) batches.push(currentBatch);
     
@@ -1202,12 +1264,18 @@ app.post('/api/club/process-weekend', strictLimiter, authenticateFinancialReques
     // Release lock
     await lockRef.set({
       isProcessing: false,
+      lastProcessedLeagueId: leagueId || null,
       lastProcessed: Date.now()
     }, { merge: true });
 
     res.status(200).json({ success: true, message: 'League processed successfully' });
   } catch (error) {
     console.error('Error processing league weekend:', error.message);
+    // Attempt to release lock on error if we started processing
+    try {
+      const lockRef = admin.firestore().collection('system').doc('league_processing');
+      await lockRef.update({ isProcessing: false });
+    } catch (e) { /* ignore */ }
     res.status(400).json({ success: false, error: error.message });
   }
 });
