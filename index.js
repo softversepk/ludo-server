@@ -1044,6 +1044,93 @@ app.post('/api/club/send-invite', strictLimiter, authenticateFinancialRequest, a
   }
 });
 
+// Secure 1-on-1 Game Invite Endpoint
+app.post('/api/game-invite/send', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { toUserId, gameData, roomCode } = req.body;
+    const fromUserId = req.userId;
+
+    if (!toUserId || !gameData || !roomCode) {
+      return res.status(400).json({ error: 'Invalid invite data' });
+    }
+
+    const rtdb = admin.database();
+    const db = admin.firestore();
+
+    // Verify sender exists
+    const senderDoc = await db.collection('users').doc(fromUserId).get();
+    if (!senderDoc.exists) {
+      throw new Error('Sender not found');
+    }
+
+    // Verify receiver exists
+    const receiverDoc = await db.collection('users').doc(toUserId).get();
+    if (!receiverDoc.exists) {
+      throw new Error('Receiver not found');
+    }
+
+    const inviteRef = rtdb.ref(`gameInvites/${toUserId}`).push();
+    const inviteDataToSave = {
+      id: inviteRef.key,
+      fromUserId: fromUserId,
+      fromUsername: gameData.fromUsername || 'Player',
+      fromAvatar: gameData.fromAvatar || 'default',
+      toUserId: toUserId,
+      gameType: gameData.gameType,
+      gameName: gameData.gameName,
+      betAmount: gameData.betAmount,
+      roomCode: roomCode,
+      gameMode: gameData.gameMode || 'classic',
+      status: 'pending',
+      timestamp: admin.database.ServerValue.TIMESTAMP,
+      expiresAt: Date.now() + 60000
+    };
+
+    await inviteRef.set(inviteDataToSave);
+
+    res.status(200).json({ 
+      success: true, 
+      inviteId: inviteRef.key,
+      roomCode: roomCode
+    });
+  } catch (error) {
+    console.error('Error sending game invite:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+// Secure 1-on-1 Game Invite Cancel Endpoint
+app.post('/api/game-invite/cancel', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { toUserId, inviteId } = req.body;
+    const fromUserId = req.userId;
+
+    if (!toUserId || !inviteId) {
+      return res.status(400).json({ error: 'Invalid cancel data' });
+    }
+
+    const rtdb = admin.database();
+
+    // The sender is cancelling. Verify the invite exists and was sent by this user
+    const inviteRef = rtdb.ref(`gameInvites/${toUserId}/${inviteId}`);
+    const snapshot = await inviteRef.once('value');
+    
+    if (snapshot.exists()) {
+      const inviteData = snapshot.val();
+      if (inviteData.fromUserId === fromUserId) {
+        await inviteRef.remove();
+      } else {
+        throw new Error('Not authorized to cancel this invite');
+      }
+    }
+
+    res.status(200).json({ success: true });
+  } catch (error) {
+    console.error('Error cancelling game invite:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
 // CLUB ENDPOINTS (Secure Backend Logic)
 app.post('/api/club/award-points', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
