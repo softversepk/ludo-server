@@ -1162,6 +1162,87 @@ app.post('/api/game-invite/cancel', strictLimiter, authenticateFinancialRequest,
   }
 });
 
+// Secure 1-on-1 Game Invite Accept Endpoint
+app.post('/api/game-invite/accept', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { inviteId } = req.body;
+    const userId = req.userId;
+
+    if (!inviteId) {
+      return res.status(400).json({ error: 'Invalid accept data' });
+    }
+
+    const rtdb = admin.database();
+
+    // Verify the invite exists and is for this user
+    const inviteRef = rtdb.ref(`gameInvites/${userId}/${inviteId}`);
+    const snapshot = await inviteRef.once('value');
+    
+    if (!snapshot.exists()) {
+      return res.status(404).json({ error: 'Invite not found' });
+    }
+
+    const inviteData = snapshot.val();
+
+    if (inviteData.status !== 'pending') {
+      return res.status(400).json({ error: 'Invite already processed' });
+    }
+
+    if (Date.now() > inviteData.expiresAt) {
+      await inviteRef.remove();
+      return res.status(400).json({ error: 'Invite expired' });
+    }
+
+    await inviteRef.update({ status: 'accepted' });
+    await inviteRef.remove();
+
+    res.status(200).json({ 
+      success: true, 
+      roomCode: inviteData.roomCode,
+      gameType: inviteData.gameType,
+      betAmount: inviteData.betAmount,
+      gameMode: inviteData.gameMode
+    });
+  } catch (error) {
+    console.error('Error accepting game invite:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+// Secure 1-on-1 Game Invite Reject Endpoint
+app.post('/api/game-invite/reject', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { inviteId } = req.body;
+    const userId = req.userId;
+
+    if (!inviteId) {
+      return res.status(400).json({ error: 'Invalid reject data' });
+    }
+
+    const rtdb = admin.database();
+
+    // Verify the invite exists and is for this user
+    const inviteRef = rtdb.ref(`gameInvites/${userId}/${inviteId}`);
+    const snapshot = await inviteRef.once('value');
+    
+    let roomCode = null;
+
+    if (snapshot.exists()) {
+      const inviteData = snapshot.val();
+      roomCode = inviteData.roomCode;
+      
+      // Update status to rejected then remove
+      await inviteRef.update({ status: 'rejected' });
+      await inviteRef.remove();
+    }
+
+    res.status(200).json({ success: true, roomCode });
+  } catch (error) {
+    console.error('Error rejecting game invite:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
 // CLUB ENDPOINTS (Secure Backend Logic)
 app.post('/api/club/award-points', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
