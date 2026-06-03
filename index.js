@@ -1137,7 +1137,8 @@ app.post('/api/game-invite/cancel', strictLimiter, authenticateFinancialRequest,
     const fromUserId = req.userId;
 
     if (!toUserId || !inviteId) {
-      return res.status(400).json({ error: 'Invalid cancel data' });
+      console.warn(`[Game Invite Cancel] Missing data. toUserId: ${toUserId}, inviteId: ${inviteId}`);
+      return res.status(400).json({ error: 'Invalid cancel data: Missing toUserId or inviteId' });
     }
 
     const rtdb = admin.database();
