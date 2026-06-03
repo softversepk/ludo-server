@@ -1173,6 +1173,7 @@ app.post('/api/game-invite/accept', strictLimiter, authenticateFinancialRequest,
     }
 
     const rtdb = admin.database();
+    const db = admin.firestore();
 
     // Verify the invite exists and is for this user
     const inviteRef = rtdb.ref(`gameInvites/${userId}/${inviteId}`);
@@ -1193,6 +1194,25 @@ app.post('/api/game-invite/accept', strictLimiter, authenticateFinancialRequest,
       return res.status(400).json({ error: 'Invite expired' });
     }
 
+    // Check if user has enough coins to accept the bet
+    const betAmount = Number(inviteData.betAmount || 0);
+    if (betAmount > 0) {
+      const userRef = db.collection('users').doc(userId);
+      await db.runTransaction(async (transaction) => {
+        const userDoc = await transaction.get(userRef);
+        if (!userDoc.exists) {
+          throw new Error('User not found');
+        }
+        const userData = userDoc.data();
+        if ((userData.coins || 0) < betAmount) {
+          throw new Error('Insufficient coins to accept this invite');
+        }
+        transaction.update(userRef, {
+          coins: admin.firestore.FieldValue.increment(-betAmount)
+        });
+      });
+    }
+
     await inviteRef.update({ status: 'accepted' });
     await inviteRef.remove();
 
@@ -1200,7 +1220,7 @@ app.post('/api/game-invite/accept', strictLimiter, authenticateFinancialRequest,
       success: true, 
       roomCode: inviteData.roomCode,
       gameType: inviteData.gameType,
-      betAmount: inviteData.betAmount,
+      betAmount: betAmount,
       gameMode: inviteData.gameMode
     });
   } catch (error) {
