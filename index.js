@@ -2536,18 +2536,30 @@ app.post('/api/friends/details', strictLimiter, authenticateFinancialRequest, as
     const db = admin.firestore();
     const friendsData = [];
     
-    // Fetch in chunks of 10 (Firestore limitation for 'in' queries, though we are doing individual gets here which is fine for small arrays)
-    // We'll just map over them
+    const clubNamesCache = {};
+    const getClubName = async (clubId) => {
+      if (!clubId) return null;
+      if (clubNamesCache[clubId] !== undefined) return clubNamesCache[clubId];
+      try {
+        const clubDoc = await db.collection('clubs').doc(clubId).get();
+        clubNamesCache[clubId] = clubDoc.exists ? (clubDoc.data().name || null) : null;
+      } catch (err) {
+        clubNamesCache[clubId] = null;
+      }
+      return clubNamesCache[clubId];
+    };
+
     const promises = friendIds.map(async (id) => {
       const docSnap = await db.collection('users').doc(id).get();
       if (docSnap.exists) {
         const data = docSnap.data();
+        const clubName = data.clubId ? await getClubName(data.clubId) : null;
         friendsData.push({
           id: docSnap.id,
           name: data.username || data.displayName || 'Unknown',
           avatar: data.avatar || 'default',
           level: data.level || 1,
-          club: data.clubName || null,
+          club: clubName,
           status: 'offline', // Default, logic on client or we can determine here
           lastActive: data.lastActive,
           currentGame: data.currentGame || null,
@@ -2587,7 +2599,22 @@ app.post('/api/friends/search', strictLimiter, authenticateFinancialRequest, asy
     
     const snapshot = await usersQuery.get();
     
+    const clubNamesCache = {};
+    const getClubName = async (clubId) => {
+      if (!clubId) return null;
+      if (clubNamesCache[clubId] !== undefined) return clubNamesCache[clubId];
+      try {
+        const clubDoc = await db.collection('clubs').doc(clubId).get();
+        clubNamesCache[clubId] = clubDoc.exists ? (clubDoc.data().name || null) : null;
+      } catch (err) {
+        clubNamesCache[clubId] = null;
+      }
+      return clubNamesCache[clubId];
+    };
+
     const users = [];
+    const promises = [];
+
     snapshot.forEach(docSnap => {
       const data = docSnap.data();
       // Exclude current user, current friends, and bots
@@ -2599,16 +2626,20 @@ app.post('/api/friends/search', strictLimiter, authenticateFinancialRequest, asy
         // Exclude users with private accounts
         if (data.settings?.privateAccount) return;
 
-        users.push({
-          id: docSnap.id,
-          name: data.username || data.displayName || 'Unknown',
-          avatar: data.avatar || 'default',
-          level: data.level || 1,
-          club: data.clubName || null,
+        const promise = getClubName(data.clubId).then(clubName => {
+          users.push({
+            id: docSnap.id,
+            name: data.username || data.displayName || 'Unknown',
+            avatar: data.avatar || 'default',
+            level: data.level || 1,
+            club: clubName,
+          });
         });
+        promises.push(promise);
       }
     });
     
+    await Promise.all(promises);
     res.json({ success: true, users });
   } catch (error) {
     console.error('[SERVER-FRIENDS] Error searching users:', error);
