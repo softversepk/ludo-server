@@ -17,16 +17,20 @@ const admin = require('firebase-admin');
 // Initialize Firebase Admin (Required for secure backend operations like XP and Economy)
 try {
   if (!admin.apps.length) {
+    const databaseURL = process.env.FIREBASE_DATABASE_URL || "https://ecommerce-1eeb2-default-rtdb.firebaseio.com";
     if (process.env.FIREBASE_SERVICE_ACCOUNT) {
       // Parse the JSON string from environment variable (useful for Railway)
       const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
       admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount)
+        credential: admin.credential.cert(serviceAccount),
+        databaseURL
       });
       console.log("✅ Firebase Admin initialized with Service Account from ENV");
     } else {
       // Fallback: This expects GOOGLE_APPLICATION_CREDENTIALS env var pointing to a file path
-      admin.initializeApp();
+      admin.initializeApp({
+        databaseURL
+      });
       console.log("✅ Firebase Admin initialized (Default)");
     }
   }
@@ -963,15 +967,23 @@ app.post('/api/club/send-invite', strictLimiter, authenticateFinancialRequest, a
       return res.status(400).json({ error: 'Invalid invite data' });
     }
 
+    if (inviteData.betAmount !== undefined && (typeof inviteData.betAmount !== 'number' || inviteData.betAmount < 0 || inviteData.betAmount > 100000000)) {
+      return res.status(400).json({ error: 'Invalid bet amount' });
+    }
+
     const db = admin.firestore();
     
-    // Verify membership
+    // Verify membership and balance
     const userDoc = await db.collection('users').doc(userId).get();
     if (!userDoc.exists || userDoc.data().clubId !== clubId) {
       throw new Error('Not a member of this club');
     }
 
     const userData = userDoc.data();
+    if (inviteData.betAmount > 0 && (userData.coins || 0) < inviteData.betAmount) {
+      return res.status(400).json({ error: 'Insufficient coins to send this invite' });
+    }
+
     const rtdb = admin.database();
 
     // Get club members
@@ -994,9 +1006,9 @@ app.post('/api/club/send-invite', strictLimiter, authenticateFinancialRequest, a
       clubId: clubId,
       playerCount: 1,
       maxPlayers: recipientMembers.length + 1,
-      betAmount: inviteData.betAmount,
-      gameType: inviteData.gameType,
-      gameMode: inviteData.gameMode || 'classic',
+      betAmount: Number(inviteData.betAmount || 0),
+      gameType: String(inviteData.gameType || 'unknown'),
+      gameMode: String(inviteData.gameMode || 'classic'),
       players: {
         [userId]: {
           username: userData.username,
@@ -1017,12 +1029,12 @@ app.post('/api/club/send-invite', strictLimiter, authenticateFinancialRequest, a
         fromUsername: userData.username,
         fromAvatar: userData.avatar || 'default',
         toUserId: memberId,
-        gameType: inviteData.gameType,
-        gameName: inviteData.gameName,
-        betAmount: inviteData.betAmount,
+        gameType: String(inviteData.gameType || 'unknown'),
+        gameName: String(inviteData.gameName || 'Game'),
+        betAmount: Number(inviteData.betAmount || 0),
         roomCode: roomCode,
         clubId: clubId,
-        gameMode: inviteData.gameMode || 'classic',
+        gameMode: String(inviteData.gameMode || 'classic'),
         isClubInvite: true,
         status: 'pending',
         timestamp: admin.database.ServerValue.TIMESTAMP,
@@ -1053,14 +1065,33 @@ app.post('/api/game-invite/send', strictLimiter, authenticateFinancialRequest, a
     if (!toUserId || !gameData || !roomCode) {
       return res.status(400).json({ error: 'Invalid invite data' });
     }
+    
+    if (toUserId === fromUserId) {
+      return res.status(400).json({ error: 'Cannot send invite to yourself' });
+    }
+
+    if (gameData.betAmount !== undefined && (typeof gameData.betAmount !== 'number' || gameData.betAmount < 0 || gameData.betAmount > 100000000)) {
+      return res.status(400).json({ error: 'Invalid bet amount' });
+    }
+
+    const validGameTypes = ['ludo', 'tictactoe', 'chess', 'snake', 'airhockey', 'ludo_2p', 'ludo_4p'];
+    if (gameData.gameType && !validGameTypes.includes(gameData.gameType.toLowerCase())) {
+      // Allow flexible game types but log warning if it's completely unknown
+      console.warn(`[Game Invite] Unknown game type: ${gameData.gameType}`);
+    }
 
     const rtdb = admin.database();
     const db = admin.firestore();
 
-    // Verify sender exists
+    // Verify sender exists and has enough balance if betAmount > 0
     const senderDoc = await db.collection('users').doc(fromUserId).get();
     if (!senderDoc.exists) {
       throw new Error('Sender not found');
+    }
+    
+    const senderData = senderDoc.data();
+    if (gameData.betAmount > 0 && (senderData.coins || 0) < gameData.betAmount) {
+      return res.status(400).json({ error: 'Insufficient coins to send this invite' });
     }
 
     // Verify receiver exists
@@ -1073,14 +1104,14 @@ app.post('/api/game-invite/send', strictLimiter, authenticateFinancialRequest, a
     const inviteDataToSave = {
       id: inviteRef.key,
       fromUserId: fromUserId,
-      fromUsername: gameData.fromUsername || 'Player',
-      fromAvatar: gameData.fromAvatar || 'default',
+      fromUsername: senderData.username || gameData.fromUsername || 'Player',
+      fromAvatar: senderData.avatar || gameData.fromAvatar || 'default',
       toUserId: toUserId,
-      gameType: gameData.gameType,
-      gameName: gameData.gameName,
-      betAmount: gameData.betAmount,
-      roomCode: roomCode,
-      gameMode: gameData.gameMode || 'classic',
+      gameType: String(gameData.gameType || 'unknown'),
+      gameName: String(gameData.gameName || 'Game'),
+      betAmount: Number(gameData.betAmount || 0),
+      roomCode: String(roomCode),
+      gameMode: String(gameData.gameMode || 'classic'),
       status: 'pending',
       timestamp: admin.database.ServerValue.TIMESTAMP,
       expiresAt: Date.now() + 60000
