@@ -2567,11 +2567,24 @@ app.post('/api/friends/details', strictLimiter, authenticateFinancialRequest, as
 // Search users securely
 app.post('/api/friends/search', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
-    const { currentUserId, currentFriends } = req.body;
+    const { currentUserId, currentFriends, query: searchQuery } = req.body;
     if (currentUserId !== req.userId) return res.status(403).json({ success: false, error: 'Unauthorized user' });
 
     const db = admin.firestore();
-    const usersQuery = db.collection('users').limit(100); // Limit to prevent massive reads
+    let usersQuery;
+    
+    if (searchQuery && searchQuery.trim().length > 0) {
+      const q = searchQuery.trim();
+      // Prefix matching search
+      usersQuery = db.collection('users')
+        .where('username', '>=', q)
+        .where('username', '<=', q + '\uf8ff')
+        .limit(50);
+    } else {
+      // Return a small default batch of users
+      usersQuery = db.collection('users').limit(20);
+    }
+    
     const snapshot = await usersQuery.get();
     
     const users = [];
@@ -2610,6 +2623,8 @@ app.post('/api/friends/request/send', strictLimiter, authenticateFinancialReques
     if (!fromUserId || !toUserId) return res.status(400).json({ success: false, error: 'Missing user IDs' });
     if (fromUserId !== req.userId) return res.status(403).json({ success: false, error: 'Unauthorized sender' });
 
+    if (fromUserId === toUserId) return res.status(400).json({ success: false, error: 'Cannot send friend request to yourself' });
+
     const db = admin.firestore();
     
     // Check if already friends
@@ -2622,7 +2637,7 @@ app.post('/api/friends/request/send', strictLimiter, authenticateFinancialReques
     const toUserSettings = toUserDoc.data()?.settings || {};
     if (toUserSettings.privateAccount) return res.status(400).json({ success: false, error: 'User has private account' });
 
-    // Check if request already exists
+    // Check if request already exists from this user to target
     const existingRequests = await db.collection('friendRequests')
       .where('fromUserId', '==', fromUserId)
       .where('toUserId', '==', toUserId)
@@ -2630,6 +2645,15 @@ app.post('/api/friends/request/send', strictLimiter, authenticateFinancialReques
       .get();
       
     if (!existingRequests.empty) return res.status(400).json({ success: false, error: 'Request already sent' });
+
+    // Check if a pending request from target to this user already exists
+    const inverseRequests = await db.collection('friendRequests')
+      .where('fromUserId', '==', toUserId)
+      .where('toUserId', '==', fromUserId)
+      .where('status', '==', 'pending')
+      .get();
+      
+    if (!inverseRequests.empty) return res.status(400).json({ success: false, error: 'You already have a pending friend request from this user' });
 
     // Create request and notification via batch
     const batch = db.batch();
@@ -2674,8 +2698,15 @@ app.post('/api/friends/request/accept', strictLimiter, authenticateFinancialRequ
       const requestRef = db.collection('friendRequests').doc(requestId);
       const requestDoc = await transaction.get(requestRef);
       
-      if (!requestDoc.exists || requestDoc.data().status !== 'pending') {
-        throw new Error('Request not found or not pending');
+      if (!requestDoc.exists) {
+        throw new Error('Request not found');
+      }
+      const requestData = requestDoc.data();
+      if (requestData.status !== 'pending') {
+        throw new Error('Request not pending');
+      }
+      if (requestData.toUserId !== toUserId || requestData.fromUserId !== fromUserId) {
+        throw new Error('Unauthorized or invalid request parameters');
       }
 
       const fromUserRef = db.collection('users').doc(fromUserId);
@@ -2719,25 +2750,38 @@ app.post('/api/friends/request/reject', strictLimiter, authenticateFinancialRequ
     if (toUserId !== req.userId) return res.status(403).json({ success: false, error: 'Unauthorized user' });
 
     const db = admin.firestore();
-    const batch = db.batch();
     
-    const requestRef = db.collection('friendRequests').doc(requestId);
-    batch.update(requestRef, {
-      status: 'rejected',
-      rejectedAt: admin.firestore.FieldValue.serverTimestamp()
+    await db.runTransaction(async (transaction) => {
+      const requestRef = db.collection('friendRequests').doc(requestId);
+      const requestDoc = await transaction.get(requestRef);
+      
+      if (!requestDoc.exists) {
+        throw new Error('Request not found');
+      }
+      const requestData = requestDoc.data();
+      if (requestData.status !== 'pending') {
+        throw new Error('Request not pending');
+      }
+      if (requestData.toUserId !== toUserId || requestData.fromUserId !== fromUserId) {
+        throw new Error('Unauthorized or invalid request parameters');
+      }
+      
+      transaction.update(requestRef, {
+        status: 'rejected',
+        rejectedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+
+      const notificationRef = db.collection('notifications').doc();
+      transaction.set(notificationRef, {
+        userId: fromUserId,
+        type: 'friend_request_rejected',
+        fromUserId: toUserId,
+        message: 'declined your friend request',
+        read: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
     });
 
-    const notificationRef = db.collection('notifications').doc();
-    batch.set(notificationRef, {
-      userId: fromUserId,
-      type: 'friend_request_rejected',
-      fromUserId: toUserId,
-      message: 'declined your friend request',
-      read: false,
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
-    });
-
-    await batch.commit();
     res.json({ success: true });
   } catch (error) {
     console.error('[SERVER-FRIENDS] Error rejecting request:', error);
@@ -2752,30 +2796,42 @@ app.post('/api/friends/remove', strictLimiter, authenticateFinancialRequest, asy
     if (userId !== req.userId) return res.status(403).json({ success: false, error: 'Unauthorized user' });
 
     const db = admin.firestore();
-    const batch = db.batch();
     
-    const userRef = db.collection('users').doc(userId);
-    const friendRef = db.collection('users').doc(friendId);
-    
-    batch.update(userRef, {
-      friends: admin.firestore.FieldValue.arrayRemove(friendId)
-    });
-    
-    batch.update(friendRef, {
-      friends: admin.firestore.FieldValue.arrayRemove(userId)
+    await db.runTransaction(async (transaction) => {
+      const userRef = db.collection('users').doc(userId);
+      const friendRef = db.collection('users').doc(friendId);
+      
+      const userDoc = await transaction.get(userRef);
+      const friendDoc = await transaction.get(friendRef);
+      
+      if (!userDoc.exists || !friendDoc.exists) {
+        throw new Error('User not found');
+      }
+      
+      const userFriends = userDoc.data().friends || [];
+      if (!userFriends.includes(friendId)) {
+        throw new Error('Not friends');
+      }
+      
+      transaction.update(userRef, {
+        friends: admin.firestore.FieldValue.arrayRemove(friendId)
+      });
+      
+      transaction.update(friendRef, {
+        friends: admin.firestore.FieldValue.arrayRemove(userId)
+      });
+
+      const notificationRef = db.collection('notifications').doc();
+      transaction.set(notificationRef, {
+        userId: friendId,
+        type: 'friend_removed',
+        fromUserId: userId,
+        message: 'removed you from their friends list',
+        read: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
     });
 
-    const notificationRef = db.collection('notifications').doc();
-    batch.set(notificationRef, {
-      userId: friendId,
-      type: 'friend_removed',
-      fromUserId: userId,
-      message: 'removed you from their friends list',
-      read: false,
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
-    });
-
-    await batch.commit();
     res.json({ success: true });
   } catch (error) {
     console.error('[SERVER-FRIENDS] Error removing friend:', error);
