@@ -1056,6 +1056,62 @@ app.post('/api/club/send-invite', strictLimiter, authenticateFinancialRequest, a
   }
 });
 
+// Securely cancel club game invite
+app.post('/api/club/cancel-invite', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { clubId, roomCode } = req.body;
+    const userId = req.userId;
+
+    if (!clubId || !roomCode) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const rtdb = admin.database();
+    const db = admin.firestore();
+
+    // Verify membership
+    const userDoc = await db.collection('users').doc(userId).get();
+    if (!userDoc.exists || userDoc.data().clubId !== clubId) {
+      throw new Error('Not a member of this club');
+    }
+
+    // Get club members
+    const membersSnapshot = await db.collection('users').where('clubId', '==', clubId).get();
+    const promises = [];
+
+    membersSnapshot.forEach(doc => {
+      const memberId = doc.id;
+      if (memberId !== userId) {
+        // Query RTDB for invites with this roomCode
+        const invitesRef = rtdb.ref(`gameInvites/${memberId}`);
+        promises.push(
+          invitesRef.orderByChild('roomCode').equalTo(roomCode).once('value').then(snapshot => {
+            if (snapshot.exists()) {
+              const updates = {};
+              snapshot.forEach(child => {
+                const inviteData = child.val();
+                if (inviteData.fromUserId === userId) {
+                  updates[child.key] = null; // Delete it
+                }
+              });
+              if (Object.keys(updates).length > 0) {
+                return invitesRef.update(updates);
+              }
+            }
+          })
+        );
+      }
+    });
+
+    await Promise.all(promises);
+
+    res.status(200).json({ success: true });
+  } catch (error) {
+    console.error('Error cancelling club invite:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
 // Secure 1-on-1 Game Invite Endpoint
 app.post('/api/game-invite/send', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
@@ -1084,15 +1140,24 @@ app.post('/api/game-invite/send', strictLimiter, authenticateFinancialRequest, a
     const db = admin.firestore();
 
     // Verify sender exists and has enough balance if betAmount > 0
-    const senderDoc = await db.collection('users').doc(fromUserId).get();
-    if (!senderDoc.exists) {
-      throw new Error('Sender not found');
-    }
-    
-    const senderData = senderDoc.data();
-    if (gameData.betAmount > 0 && (senderData.coins || 0) < gameData.betAmount) {
-      return res.status(400).json({ error: 'Insufficient coins to send this invite' });
-    }
+    let senderData;
+    await db.runTransaction(async (transaction) => {
+      const senderRef = db.collection('users').doc(fromUserId);
+      const senderDoc = await transaction.get(senderRef);
+      if (!senderDoc.exists) {
+        throw new Error('Sender not found');
+      }
+      
+      senderData = senderDoc.data();
+      if (gameData.betAmount > 0) {
+        if ((senderData.coins || 0) < gameData.betAmount) {
+          throw new Error('Insufficient coins to send this invite');
+        }
+        transaction.update(senderRef, {
+          coins: admin.firestore.FieldValue.increment(-gameData.betAmount)
+        });
+      }
+    });
 
     // Verify receiver exists
     const receiverDoc = await db.collection('users').doc(toUserId).get();
@@ -1142,6 +1207,7 @@ app.post('/api/game-invite/cancel', strictLimiter, authenticateFinancialRequest,
     }
 
     const rtdb = admin.database();
+    const db = admin.firestore();
 
     // The sender is cancelling. Verify the invite exists and was sent by this user
     const inviteRef = rtdb.ref(`gameInvites/${toUserId}/${inviteId}`);
@@ -1150,6 +1216,18 @@ app.post('/api/game-invite/cancel', strictLimiter, authenticateFinancialRequest,
     if (snapshot.exists()) {
       const inviteData = snapshot.val();
       if (inviteData.fromUserId === fromUserId) {
+        // Refund the bet amount
+        if (inviteData.betAmount > 0) {
+          const senderRef = db.collection('users').doc(fromUserId);
+          await db.runTransaction(async (transaction) => {
+            const senderDoc = await transaction.get(senderRef);
+            if (senderDoc.exists) {
+              transaction.update(senderRef, {
+                coins: admin.firestore.FieldValue.increment(inviteData.betAmount)
+              });
+            }
+          });
+        }
         await inviteRef.remove();
       } else {
         throw new Error('Not authorized to cancel this invite');
@@ -1222,7 +1300,8 @@ app.post('/api/game-invite/accept', strictLimiter, authenticateFinancialRequest,
       roomCode: inviteData.roomCode,
       gameType: inviteData.gameType,
       betAmount: betAmount,
-      gameMode: inviteData.gameMode
+      gameMode: inviteData.gameMode,
+      clubId: inviteData.clubId || null
     });
   } catch (error) {
     console.error('Error accepting game invite:', error.message);
@@ -1241,6 +1320,7 @@ app.post('/api/game-invite/reject', strictLimiter, authenticateFinancialRequest,
     }
 
     const rtdb = admin.database();
+    const db = admin.firestore();
 
     // Verify the invite exists and is for this user
     const inviteRef = rtdb.ref(`gameInvites/${userId}/${inviteId}`);
@@ -1252,6 +1332,19 @@ app.post('/api/game-invite/reject', strictLimiter, authenticateFinancialRequest,
       const inviteData = snapshot.val();
       roomCode = inviteData.roomCode;
       
+      // Refund the sender's bet amount
+      if (inviteData.betAmount > 0) {
+        const senderRef = db.collection('users').doc(inviteData.fromUserId);
+        await db.runTransaction(async (transaction) => {
+          const senderDoc = await transaction.get(senderRef);
+          if (senderDoc.exists) {
+            transaction.update(senderRef, {
+              coins: admin.firestore.FieldValue.increment(inviteData.betAmount)
+            });
+          }
+        });
+      }
+
       // Update status to rejected then remove
       await inviteRef.update({ status: 'rejected' });
       await inviteRef.remove();
