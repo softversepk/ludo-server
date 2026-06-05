@@ -67,6 +67,21 @@ class ChessGameServer {
           if (game.players.white.uid === userId || game.players.black.uid === userId) {
             socket.join(roomId);
             console.log(`♟️ [CHESS] Auto-joined socket ${socket.id} to room ${roomId}`);
+            
+            // SECURITY: Update the socketId in the game players object!
+            if (game.players.white.uid === userId) {
+              game.players.white.socketId = socket.id;
+            } else if (game.players.black.uid === userId) {
+              game.players.black.socketId = socket.id;
+            }
+            
+            // Send current game state to catch up on any missed moves
+            if (game.gameState) {
+              socket.emit('chess:gameUpdate', {
+                gameState: game.gameState,
+                timestamp: Date.now()
+              });
+            }
           }
         }
       });
