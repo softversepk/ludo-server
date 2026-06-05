@@ -88,7 +88,8 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 // Production CORS configuration with security
 const corsOptions = {
   origin: "*", // Allow all origins for easier connection during development and testing
-  methods: ["GET", "POST"],
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
   credentials: true,
   optionsSuccessStatus: 200 // For legacy browser support
 };
@@ -2982,7 +2983,7 @@ app.get('/api/status', (req, res) => {
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: corsOptions,
-  transports: ['websocket', 'polling'],
+  transports: ['polling', 'websocket'], // Polling first for better mobile compatibility
   pingTimeout: 60000,
   pingInterval: 25000,
   maxHttpBufferSize: 1e6, // 1MB limit for socket messages
