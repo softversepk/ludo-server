@@ -14,7 +14,7 @@ const TicTacToeGameServer = require("./ticTacToeServer");
 const { processUserXP } = require('./xpService');
 const admin = require('firebase-admin');
 
-// Initialize Firebase Admin (Required for secure backend operations like XP and EconomyY)
+// Initialize Firebase Admin (Required for secure backend operations like XP and Economy)
 try {
   if (!admin.apps.length) {
     const databaseURL = process.env.FIREBASE_DATABASE_URL || "https://customer-abe40-default-rtdb.firebaseio.com";
@@ -89,7 +89,7 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 const corsOptions = {
   origin: "*", // Allow all origins for easier connection during development and testing
   methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  allowedHeaders: ["Content-Type", "Authorization", "x-user-id", "X-User-ID", "x-auth-token"],
   credentials: true,
   optionsSuccessStatus: 200 // For legacy browser support
 };
