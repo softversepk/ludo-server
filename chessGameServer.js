@@ -89,8 +89,20 @@ class ChessGameServer {
       // Join room (for players navigating to game screen)
       socket.on('chess:joinRoom', (data, callback) => {
         const { roomId } = data;
-        socket.join(roomId);
-        console.log(`♟️ [CHESS] Socket ${socket.id} joined room ${roomId}`);
+        if (roomId) {
+          socket.join(roomId);
+          console.log(`♟️ [CHESS] Socket ${socket.id} joined room ${roomId} (Explicit)`);
+          
+          // SECURE: Also update the socketId in the active game reference just in case it's a reconnection
+          const game = this.activeGames.get(roomId);
+          if (game && socket.userId) {
+            if (game.players.white.uid === socket.userId) {
+              game.players.white.socketId = socket.id;
+            } else if (game.players.black.uid === socket.userId) {
+              game.players.black.socketId = socket.id;
+            }
+          }
+        }
         if (callback) callback({ success: true });
       });
 
@@ -550,6 +562,16 @@ class ChessGameServer {
       return;
     }
 
+    const { initializeChessGame, movePiece, getLegalMoves, isCheckmate } = require('./utils/chessLogic');
+
+    // Initialize game state if this is the first move/sync
+    if (!game.gameState) {
+      game.gameState = initializeChessGame();
+      console.log(`♟️ [CHESS] Game state initialized for ${roomId}`);
+    }
+
+    const isWhiteTurn = game.gameState.currentTurn === 'white';
+    
     // SECURITY: Validate that the socket making the request belongs to one of the players
     const whitePlayer = game.players.white;
     const blackPlayer = game.players.black;
@@ -564,14 +586,7 @@ class ChessGameServer {
       return;
     }
 
-    const { initializeChessGame, movePiece, getLegalMoves, isCheckmate } = require('./utils/chessLogic');
-
-    // Initialize game state if this is the first move/sync
-    if (!game.gameState) {
-      game.gameState = initializeChessGame();
-      console.log(`♟️ [CHESS] Game state initialized for ${roomId}`);
-    }
-
+    // Update game state with the incoming lastMove object so we can validate it
     const lastMove = gameState?.lastMove;
     if (!lastMove) {
       // Just syncing state (e.g. initial connection), broadcast current state
@@ -579,12 +594,15 @@ class ChessGameServer {
         gameState: game.gameState,
         timestamp: Date.now()
       });
+      // Fallback
+      if (whitePlayer.socketId && whitePlayer.socketId !== socket.id) this.io.to(whitePlayer.socketId).emit('chess:gameUpdate', { gameState: game.gameState, timestamp: Date.now() });
+      if (blackPlayer.socketId && blackPlayer.socketId !== socket.id) this.io.to(blackPlayer.socketId).emit('chess:gameUpdate', { gameState: game.gameState, timestamp: Date.now() });
+      
       if (callback) callback({ success: true, gameState: game.gameState });
       return;
     }
 
     // Is it the player's turn?
-    const isWhiteTurn = game.gameState.currentTurn === 'white';
     if ((isWhiteTurn && !isValidWhite) || (!isWhiteTurn && !isValidBlack)) {
       if (callback) callback({ error: 'Not your turn' });
       return;
@@ -621,6 +639,20 @@ class ChessGameServer {
       gameState: newState,
       timestamp: Date.now()
     });
+    
+    // Fallback explicitly to both sockets
+    if (whitePlayer.socketId) {
+      this.io.to(whitePlayer.socketId).emit('chess:gameUpdate', {
+        gameState: newState,
+        timestamp: Date.now()
+      });
+    }
+    if (blackPlayer.socketId) {
+      this.io.to(blackPlayer.socketId).emit('chess:gameUpdate', {
+        gameState: newState,
+        timestamp: Date.now()
+      });
+    }
 
     console.log(`♟️ [CHESS] Move in ${roomId}: ${lastMove.from} -> ${lastMove.to}`);
 
