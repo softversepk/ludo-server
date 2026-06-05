@@ -17,7 +17,7 @@ exports.algebraicToCoords = (position) => {
 /**
  * Convert coordinates to algebraic notation
  */
-exports.coordsToAlgebraic = (row, col) => {
+const coordsToAlgebraic = (row, col) => {
   const file = FILES[col];
   const rank = 8 - row;
   return `${file}${rank}`;
@@ -26,7 +26,7 @@ exports.coordsToAlgebraic = (row, col) => {
 /**
  * Initialize chess board with pieces
  */
-exports.initializeChessGame = (playerColor = COLORS.WHITE) => {
+const initializeChessGame = (playerColor = COLORS.WHITE) => {
   const pieces = [];
   
   // White pieces
@@ -79,14 +79,14 @@ exports.initializeChessGame = (playerColor = COLORS.WHITE) => {
 /**
  * Get piece at position
  */
-exports.getPieceAt = (pieces, position) => {
+const getPieceAt = (pieces, position) => {
   return pieces.find(p => p.position === position);
 };
 
 /**
  * Check if square is occupied by same color
  */
-exports.isOccupiedBySameColor = (pieces, position, color) => {
+const isOccupiedBySameColor = (pieces, position, color) => {
   const piece = getPieceAt(pieces, position);
   return piece && piece.color === color;
 };
@@ -94,7 +94,7 @@ exports.isOccupiedBySameColor = (pieces, position, color) => {
 /**
  * Check if square is occupied by opponent
  */
-exports.isOccupiedByOpponent = (pieces, position, color) => {
+const isOccupiedByOpponent = (pieces, position, color) => {
   const piece = getPieceAt(pieces, position);
   return piece && piece.color !== color;
 };
@@ -102,7 +102,7 @@ exports.isOccupiedByOpponent = (pieces, position, color) => {
 /**
  * Check if position is on board
  */
-exports.isOnBoard = (row, col) => {
+const isOnBoard = (row, col) => {
   return row >= 0 && row < BOARD_SIZE && col >= 0 && col < BOARD_SIZE;
 };
 
@@ -284,7 +284,7 @@ const getKingMoves = (piece, pieces) => {
 /**
  * Get all legal moves for a piece
  */
-exports.getLegalMoves = (piece, pieces) => {
+const getLegalMoves = (piece, pieces) => {
   if (!piece) return [];
   
   switch (piece.type) {
@@ -308,7 +308,7 @@ exports.getLegalMoves = (piece, pieces) => {
 /**
  * Check if king is in check
  */
-exports.isKingInCheck = (pieces, color) => {
+const isKingInCheck = (pieces, color) => {
   const king = pieces.find(p => p.type === PIECES.KING && p.color === color);
   if (!king) return false;
   
@@ -328,7 +328,7 @@ exports.isKingInCheck = (pieces, color) => {
 /**
  * Move piece and return new game state
  */
-exports.movePiece = (gameState, fromPos, toPos) => {
+const movePiece = (gameState, fromPos, toPos) => {
   const { pieces, currentTurn, capturedPieces, moveHistory = [] } = gameState;
   
   const movingPiece = getPieceAt(pieces, fromPos);
@@ -375,7 +375,7 @@ exports.movePiece = (gameState, fromPos, toPos) => {
 /**
  * Check if checkmate
  */
-exports.isCheckmate = (pieces, color) => {
+const isCheckmate = (pieces, color) => {
   if (!isKingInCheck(pieces, color)) return false;
   
   // Check if any move can get out of check
@@ -399,4 +399,18 @@ exports.isCheckmate = (pieces, color) => {
   }
   
   return true;
+};
+
+module.exports = {
+  algebraicToCoords,
+  coordsToAlgebraic,
+  initializeChessGame,
+  getPieceAt,
+  isOccupiedBySameColor,
+  isOccupiedByOpponent,
+  isOnBoard,
+  getLegalMoves,
+  isKingInCheck,
+  movePiece,
+  isCheckmate
 };
