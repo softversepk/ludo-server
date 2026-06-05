@@ -88,7 +88,7 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 // Production CORS configuration with security
 const corsOptions = {
   origin: "*", // Allow all origins for easier connection during development and testing
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  methods: ["GET", "POST", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
   credentials: true,
   optionsSuccessStatus: 200 // For legacy browser support
@@ -1139,12 +1139,6 @@ app.post('/api/game-invite/send', strictLimiter, authenticateFinancialRequest, a
 
     const rtdb = admin.database();
     const db = admin.firestore();
-    
-    const parsedBetAmount = Number(gameData.betAmount) || 0;
-    if (parsedBetAmount < 0) {
-      throw new Error('Invalid bet amount');
-    }
-    gameData.betAmount = parsedBetAmount;
 
     // Verify sender exists and has enough balance if betAmount > 0
     let senderData;
@@ -2988,11 +2982,7 @@ app.get('/api/status', (req, res) => {
 
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: {
-    origin: "*", // Explicitly allow all origins for Socket.IO
-    methods: ["GET", "POST", "OPTIONS"],
-    credentials: true,
-  },
+  cors: corsOptions,
   transports: ['polling', 'websocket'], // Polling first for better mobile compatibility
   pingTimeout: 60000,
   pingInterval: 25000,
@@ -3113,41 +3103,32 @@ const generateRoomCode = () => {
 
 // Helper to securely deduct coins
 const secureDeductCoins = async (userId, amount) => {
-  if (!userId) {
-    console.error(`[SECURITY] Coin deduction failed: Missing userId`);
-    return { success: false, error: 'Missing userId' };
-  }
-  const parsedAmount = Number(amount);
-  if (isNaN(parsedAmount) || parsedAmount <= 0) return { success: true };
-  
+  if (!amount || amount <= 0) return true;
   try {
     const userRef = admin.firestore().collection('users').doc(userId);
     return await admin.firestore().runTransaction(async (transaction) => {
       const userDoc = await transaction.get(userRef);
       if (!userDoc.exists) throw new Error('User not found');
-      const currentCoins = Number(userDoc.data().coins) || 0;
-      if (currentCoins < parsedAmount) throw new Error(`Not enough coins. Has ${currentCoins}, needs ${parsedAmount}`);
+      const currentCoins = userDoc.data().coins || 0;
+      if (currentCoins < amount) throw new Error('Not enough coins');
       transaction.update(userRef, {
-        coins: admin.firestore.FieldValue.increment(-parsedAmount)
+        coins: admin.firestore.FieldValue.increment(-amount)
       });
-      return { success: true };
+      return true;
     });
   } catch (error) {
     console.error(`[SECURITY] Coin deduction failed for ${userId}:`, error.message);
-    return { success: false, error: error.message };
+    return false;
   }
 };
 
 // Helper to securely refund coins
 const secureRefundCoins = async (userId, amount) => {
-  if (!userId) return false;
-  const parsedAmount = Number(amount);
-  if (isNaN(parsedAmount) || parsedAmount <= 0) return true;
-  
+  if (!amount || amount <= 0) return true;
   try {
     const userRef = admin.firestore().collection('users').doc(userId);
     await userRef.update({
-      coins: admin.firestore.FieldValue.increment(parsedAmount)
+      coins: admin.firestore.FieldValue.increment(amount)
     });
     return true;
   } catch (error) {
@@ -3201,23 +3182,16 @@ io.on("connection", (socket) => {
 
   // CREATE ROOM
   socket.on("create_room", async (hostData, callback) => {
-    let betAmount = Number(hostData.betAmount) || 100;
-    
-    if (betAmount < 0) {
-      if (callback) callback({ success: false, error: "Invalid bet amount" });
-      return;
-    }
+    const betAmount = hostData.betAmount || 100;
     
     // Check and deduct coins before creating room
     if (betAmount > 0) {
-      const deductionResult = await secureDeductCoins(hostData.uid, betAmount);
-      if (!deductionResult.success) {
-        if (callback) callback({ success: false, error: deductionResult.error });
+      const deductionSuccess = await secureDeductCoins(hostData.uid, betAmount);
+      if (!deductionSuccess) {
+        if (callback) callback({ success: false, error: "Not enough coins or error deducting coins" });
         return;
       }
     }
-    
-    hostData.betAmount = betAmount;
 
     const roomCode = generateRoomCode();
 
@@ -3283,13 +3257,13 @@ io.on("connection", (socket) => {
       return;
     }
 
-    const betAmount = Number(room.betAmount) || 100;
+    const betAmount = room.betAmount || 100;
     
     // Check and deduct coins before joining room
     if (betAmount > 0) {
-      const deductionResult = await secureDeductCoins(playerData.uid, betAmount);
-      if (!deductionResult.success) {
-        if (callback) callback({ success: false, error: deductionResult.error });
+      const deductionSuccess = await secureDeductCoins(playerData.uid, betAmount);
+      if (!deductionSuccess) {
+        if (callback) callback({ success: false, error: "Not enough coins or error deducting coins" });
         return;
       }
     }
@@ -3358,23 +3332,15 @@ io.on("connection", (socket) => {
     });
 
     const { mode, betAmount } = playerData;
-    const parsedBetAmount = Number(betAmount) || 0;
-    
-    if (parsedBetAmount < 0) {
-      if (callback) callback({ success: false, error: "Invalid bet amount" });
-      return;
-    }
     
     // Check and deduct coins before proceeding with matchmaking
-    if (parsedBetAmount > 0) {
-      const deductionResult = await secureDeductCoins(playerData.uid, parsedBetAmount);
-      if (!deductionResult.success) {
-        if (callback) callback({ success: false, error: deductionResult.error });
+    if (betAmount > 0) {
+      const deductionSuccess = await secureDeductCoins(playerData.uid, betAmount);
+      if (!deductionSuccess) {
+        if (callback) callback({ success: false, error: "Not enough coins or error deducting coins" });
         return;
       }
     }
-
-    playerData.betAmount = parsedBetAmount; // ensure it's a number for further logic
 
     let joinedRoomCode = null;
 
