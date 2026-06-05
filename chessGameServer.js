@@ -18,16 +18,22 @@ class ChessGameServer {
 
   // Helper to securely deduct coins
   async secureDeductCoins(userId, amount) {
-    if (!amount || amount <= 0) return true;
+    if (!userId) {
+      console.error(`♟️ [CHESS SECURITY] Coin deduction failed: Missing userId`);
+      return false;
+    }
+    const parsedAmount = Number(amount);
+    if (isNaN(parsedAmount) || parsedAmount <= 0) return true;
+    
     try {
       const userRef = this.admin.firestore().collection('users').doc(userId);
       return await this.admin.firestore().runTransaction(async (transaction) => {
         const userDoc = await transaction.get(userRef);
         if (!userDoc.exists) throw new Error('User not found');
-        const currentCoins = userDoc.data().coins || 0;
-        if (currentCoins < amount) throw new Error('Not enough coins');
+        const currentCoins = Number(userDoc.data().coins) || 0;
+        if (currentCoins < parsedAmount) throw new Error(`Not enough coins. Has ${currentCoins}, needs ${parsedAmount}`);
         transaction.update(userRef, {
-          coins: this.admin.firestore.FieldValue.increment(-amount)
+          coins: this.admin.firestore.FieldValue.increment(-parsedAmount)
         });
         return true;
       });
@@ -39,11 +45,14 @@ class ChessGameServer {
 
   // Helper to securely refund coins
   async secureRefundCoins(userId, amount) {
-    if (!amount || amount <= 0) return true;
+    if (!userId) return false;
+    const parsedAmount = Number(amount);
+    if (isNaN(parsedAmount) || parsedAmount <= 0) return true;
+    
     try {
       const userRef = this.admin.firestore().collection('users').doc(userId);
       await userRef.update({
-        coins: this.admin.firestore.FieldValue.increment(amount)
+        coins: this.admin.firestore.FieldValue.increment(parsedAmount)
       });
       return true;
     } catch (error) {
@@ -239,7 +248,15 @@ class ChessGameServer {
       if (callback) callback({ success: false, error: 'Invalid data' });
       return;
     }
-    const { userId, username, avatar, level, betAmount } = data;
+    let { userId, username, avatar, level, betAmount } = data;
+    const parsedBetAmount = Number(betAmount) || 0;
+
+    if (parsedBetAmount < 0) {
+      if (callback) callback({ success: false, error: 'Invalid bet amount' });
+      return;
+    }
+
+    betAmount = parsedBetAmount; // use parsed amount
 
     console.log(`♟️ [CHESS] ${username} searching for match (bet: ${betAmount})`);
     console.log(`♟️ [CHESS] Current queue size: ${this.matchmakingQueue.size}`);
