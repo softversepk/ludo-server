@@ -3115,10 +3115,10 @@ const generateRoomCode = () => {
 const secureDeductCoins = async (userId, amount) => {
   if (!userId) {
     console.error(`[SECURITY] Coin deduction failed: Missing userId`);
-    return false;
+    return { success: false, error: 'Missing userId' };
   }
   const parsedAmount = Number(amount);
-  if (isNaN(parsedAmount) || parsedAmount <= 0) return true;
+  if (isNaN(parsedAmount) || parsedAmount <= 0) return { success: true };
   
   try {
     const userRef = admin.firestore().collection('users').doc(userId);
@@ -3130,11 +3130,11 @@ const secureDeductCoins = async (userId, amount) => {
       transaction.update(userRef, {
         coins: admin.firestore.FieldValue.increment(-parsedAmount)
       });
-      return true;
+      return { success: true };
     });
   } catch (error) {
     console.error(`[SECURITY] Coin deduction failed for ${userId}:`, error.message);
-    return false;
+    return { success: false, error: error.message };
   }
 };
 
@@ -3210,9 +3210,9 @@ io.on("connection", (socket) => {
     
     // Check and deduct coins before creating room
     if (betAmount > 0) {
-      const deductionSuccess = await secureDeductCoins(hostData.uid, betAmount);
-      if (!deductionSuccess) {
-        if (callback) callback({ success: false, error: "Not enough coins or error deducting coins" });
+      const deductionResult = await secureDeductCoins(hostData.uid, betAmount);
+      if (!deductionResult.success) {
+        if (callback) callback({ success: false, error: deductionResult.error });
         return;
       }
     }
@@ -3287,9 +3287,9 @@ io.on("connection", (socket) => {
     
     // Check and deduct coins before joining room
     if (betAmount > 0) {
-      const deductionSuccess = await secureDeductCoins(playerData.uid, betAmount);
-      if (!deductionSuccess) {
-        if (callback) callback({ success: false, error: "Not enough coins or error deducting coins" });
+      const deductionResult = await secureDeductCoins(playerData.uid, betAmount);
+      if (!deductionResult.success) {
+        if (callback) callback({ success: false, error: deductionResult.error });
         return;
       }
     }
@@ -3367,9 +3367,9 @@ io.on("connection", (socket) => {
     
     // Check and deduct coins before proceeding with matchmaking
     if (parsedBetAmount > 0) {
-      const deductionSuccess = await secureDeductCoins(playerData.uid, parsedBetAmount);
-      if (!deductionSuccess) {
-        if (callback) callback({ success: false, error: "Not enough coins or error deducting coins" });
+      const deductionResult = await secureDeductCoins(playerData.uid, parsedBetAmount);
+      if (!deductionResult.success) {
+        if (callback) callback({ success: false, error: deductionResult.error });
         return;
       }
     }
