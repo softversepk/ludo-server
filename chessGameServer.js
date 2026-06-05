@@ -16,7 +16,7 @@ class ChessGameServer {
     this.setupEventHandlers();
   }
 
-  // Helper to securely deduct coins
+  // Helper to securely deduct coinsS
   async secureDeductCoins(userId, amount) {
     if (!amount || amount <= 0) return true;
     try {
