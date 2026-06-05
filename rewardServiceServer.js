@@ -17,6 +17,9 @@ class RewardServiceServer {
     try {
       if (!userId) return { success: false, error: 'No user ID' };
       
+      const parsedBetAmount = Number(betAmount) || 100;
+      if (parsedBetAmount < 0) return { success: false, error: 'Invalid bet amount' };
+      
       const db = admin.firestore();
       const userRef = db.collection('users').doc(userId);
       const userDoc = await userRef.get();
@@ -28,15 +31,15 @@ class RewardServiceServer {
       
       let coinReward = 0;
       if (totalPlayers === 4) {
-        if (position === 1) coinReward = betAmount * 3.0; // 1st place gets 3x (e.g. 300)
-        else if (position === 2) coinReward = betAmount * 1.0; // 2nd place gets 1x (e.g. 100)
+        if (position === 1) coinReward = parsedBetAmount * 3.0; // 1st place gets 3x (e.g. 300)
+        else if (position === 2) coinReward = parsedBetAmount * 1.0; // 2nd place gets 1x (e.g. 100)
         else if (position === 3) coinReward = 0; // 3rd place gets 0
         else coinReward = 0;
       } else {
-        coinReward = Math.floor(betAmount * COIN_MULTIPLIER); // Default 2.0
+        coinReward = Math.floor(parsedBetAmount * COIN_MULTIPLIER); // Default 2.0
       }
       
-      const clubPointReward = CLUB_POINTS_BY_BET[betAmount] || Math.max(1, Math.floor(betAmount / 100));
+      const clubPointReward = CLUB_POINTS_BY_BET[parsedBetAmount] || Math.max(1, Math.floor(parsedBetAmount / 100));
       
       // Award coins
       const batch = db.batch();
@@ -200,12 +203,16 @@ class RewardServiceServer {
   static async awardGameDraw(userId, gameType, betAmount = 100) {
     try {
       if (!userId) return { success: false, error: 'No user ID' };
+      
+      const parsedBetAmount = Number(betAmount) || 100;
+      if (parsedBetAmount < 0) return { success: false, error: 'Invalid bet amount' };
+      
       const db = admin.firestore();
       const userRef = db.collection('users').doc(userId);
       
       // Refund the bet amount
       await userRef.update({
-        coins: admin.firestore.FieldValue.increment(betAmount),
+        coins: admin.firestore.FieldValue.increment(parsedBetAmount),
         gamesPlayed: admin.firestore.FieldValue.increment(1),
         gamesDrawn: admin.firestore.FieldValue.increment(1)
       });
