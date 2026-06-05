@@ -20,10 +20,10 @@ class ChessGameServer {
   async secureDeductCoins(userId, amount) {
     if (!userId) {
       console.error(`♟️ [CHESS SECURITY] Coin deduction failed: Missing userId`);
-      return false;
+      return { success: false, error: 'Missing userId' };
     }
     const parsedAmount = Number(amount);
-    if (isNaN(parsedAmount) || parsedAmount <= 0) return true;
+    if (isNaN(parsedAmount) || parsedAmount <= 0) return { success: true };
     
     try {
       const userRef = this.admin.firestore().collection('users').doc(userId);
@@ -35,11 +35,11 @@ class ChessGameServer {
         transaction.update(userRef, {
           coins: this.admin.firestore.FieldValue.increment(-parsedAmount)
         });
-        return true;
+        return { success: true };
       });
     } catch (error) {
       console.error(`♟️ [CHESS SECURITY] Coin deduction failed for ${userId}:`, error.message);
-      return false;
+      return { success: false, error: error.message };
     }
   }
 
@@ -270,9 +270,9 @@ class ChessGameServer {
 
     // Check and deduct coins before adding to queue
     if (betAmount > 0) {
-      const deductionSuccess = await this.secureDeductCoins(userId, betAmount);
-      if (!deductionSuccess) {
-        if (callback) callback({ success: false, error: "Not enough coins or error deducting coins" });
+      const deductionResult = await this.secureDeductCoins(userId, betAmount);
+      if (!deductionResult.success) {
+        if (callback) callback({ success: false, error: deductionResult.error });
         return;
       }
     }
@@ -333,11 +333,11 @@ class ChessGameServer {
       }
       this.matchmakingIntervals.set(userId, checkInterval);
 
-      // Set up 3-second timeout for AI bot auto-join
+      // Set up 30-second timeout for AI bot auto-join
       const aiTimeoutId = setTimeout(() => {
         // Check if player is still waiting (no match found)
         if (this.matchmakingQueue.has(userId)) {
-          console.log(`♟️ [CHESS] No opponent found after 3 seconds. Creating AI game for ${username}`);
+          console.log(`♟️ [CHESS] No opponent found after 30 seconds. Creating AI game for ${username}`);
           
           // Remove from queue
           this.matchmakingQueue.delete(userId);
@@ -351,7 +351,7 @@ class ChessGameServer {
           // Create AI game
           this.createAIGame(userId, username, avatar, level, betAmount, socket);
         }
-      }, 3000); // 3 seconds
+      }, 30000); // 30 seconds
 
       // Store timeout ID for cleanup
       if (!this.aiTimeouts) {
