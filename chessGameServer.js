@@ -124,6 +124,10 @@ class ChessGameServer {
       // Get AI move for local games
       socket.on('chess:get_ai_move', (data, callback) => {
         try {
+          if (!data || !data.gameState) {
+            if (callback) callback({ success: false, error: 'Invalid data' });
+            return;
+          }
           const { gameState } = data;
           const { getLegalMoves, movePiece, isCheckmate } = require('./utils/chessLogic');
           const { pieces, currentTurn } = gameState;
@@ -204,6 +208,10 @@ class ChessGameServer {
   }
 
   async handleFindMatch(socket, data, callback) {
+    if (!data) {
+      if (callback) callback({ success: false, error: 'Invalid data' });
+      return;
+    }
     const { userId, username, avatar, level, betAmount } = data;
 
     console.log(`♟️ [CHESS] ${username} searching for match (bet: ${betAmount})`);
@@ -509,7 +517,16 @@ class ChessGameServer {
   }
 
   handleMakeMove(socket, data, callback) {
+    if (!data) {
+      if (callback) callback({ error: 'Invalid data' });
+      return;
+    }
     const { roomId, gameState } = data;
+    if (!roomId) {
+      if (callback) callback({ error: 'Room ID required' });
+      return;
+    }
+
     const game = this.activeGames.get(roomId);
 
     if (!game) {
@@ -600,8 +617,10 @@ class ChessGameServer {
     }
   }
 
-  handleTriggerBot(socket, { roomId }) {
+  handleTriggerBot(socket, data) {
+    if (!data || !data.roomId) return;
     try {
+      const { roomId } = data;
       const game = this.activeGames.get(roomId);
       if (!game || !game.gameState) return;
 
@@ -667,7 +686,15 @@ class ChessGameServer {
   }
 
   handleResign(socket, data, callback) {
+    if (!data) {
+      if (callback) callback({ error: 'Invalid data' });
+      return;
+    }
     const { roomId, resigningPlayerId, betAmount } = data;
+    if (!roomId) {
+      if (callback) callback({ error: 'Room ID required' });
+      return;
+    }
     const game = this.activeGames.get(roomId);
 
     if (!game) {
@@ -716,7 +743,15 @@ class ChessGameServer {
   }
 
   handleLeaveGame(socket, data, callback) {
+    if (!data) {
+      if (callback) callback({ error: 'Invalid data' });
+      return;
+    }
     const { roomId, playerId, betAmount } = data;
+    if (!roomId) {
+      if (callback) callback({ error: 'Room ID required' });
+      return;
+    }
     const game = this.activeGames.get(roomId);
 
     if (!game) {
