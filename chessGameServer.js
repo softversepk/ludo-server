@@ -18,41 +18,32 @@ class ChessGameServer {
 
   // Helper to securely deduct coins
   async secureDeductCoins(userId, amount) {
-    if (!userId) {
-      console.error(`♟️ [CHESS SECURITY] Coin deduction failed: Missing userId`);
-      return { success: false, error: 'Missing userId' };
-    }
-    const parsedAmount = Number(amount);
-    if (isNaN(parsedAmount) || parsedAmount <= 0) return { success: true };
-    
+    if (!amount || amount <= 0) return true;
     try {
       const userRef = this.admin.firestore().collection('users').doc(userId);
       return await this.admin.firestore().runTransaction(async (transaction) => {
         const userDoc = await transaction.get(userRef);
         if (!userDoc.exists) throw new Error('User not found');
-        const currentCoins = Number(userDoc.data().coins) || 0;
-        if (currentCoins < parsedAmount) throw new Error(`Not enough coins. Has ${currentCoins}, needs ${parsedAmount}`);
+        const currentCoins = userDoc.data().coins || 0;
+        if (currentCoins < amount) throw new Error('Not enough coins');
         transaction.update(userRef, {
-          coins: this.admin.firestore.FieldValue.increment(-parsedAmount)
+          coins: this.admin.firestore.FieldValue.increment(-amount)
         });
-        return { success: true };
+        return true;
       });
     } catch (error) {
       console.error(`♟️ [CHESS SECURITY] Coin deduction failed for ${userId}:`, error.message);
-      return { success: false, error: error.message };
+      return false;
     }
   }
 
   // Helper to securely refund coins
   async secureRefundCoins(userId, amount) {
-    if (!userId) return false;
-    const parsedAmount = Number(amount);
-    if (isNaN(parsedAmount) || parsedAmount <= 0) return true;
-    
+    if (!amount || amount <= 0) return true;
     try {
       const userRef = this.admin.firestore().collection('users').doc(userId);
       await userRef.update({
-        coins: this.admin.firestore.FieldValue.increment(parsedAmount)
+        coins: this.admin.firestore.FieldValue.increment(amount)
       });
       return true;
     } catch (error) {
@@ -76,21 +67,6 @@ class ChessGameServer {
           if (game.players.white.uid === userId || game.players.black.uid === userId) {
             socket.join(roomId);
             console.log(`♟️ [CHESS] Auto-joined socket ${socket.id} to room ${roomId}`);
-            
-            // SECURITY: Update the socketId in the game players object!
-            if (game.players.white.uid === userId) {
-              game.players.white.socketId = socket.id;
-            } else if (game.players.black.uid === userId) {
-              game.players.black.socketId = socket.id;
-            }
-            
-            // Send current game state to catch up on any missed moves
-            if (game.gameState) {
-              socket.emit('chess:gameUpdate', {
-                gameState: game.gameState,
-                timestamp: Date.now()
-              });
-            }
           }
         }
       });
@@ -98,20 +74,8 @@ class ChessGameServer {
       // Join room (for players navigating to game screen)
       socket.on('chess:joinRoom', (data, callback) => {
         const { roomId } = data;
-        if (roomId) {
-          socket.join(roomId);
-          console.log(`♟️ [CHESS] Socket ${socket.id} joined room ${roomId} (Explicit)`);
-          
-          // SECURE: Also update the socketId in the active game reference just in case it's a reconnection
-          const game = this.activeGames.get(roomId);
-          if (game && socket.userId) {
-            if (game.players.white.uid === socket.userId) {
-              game.players.white.socketId = socket.id;
-            } else if (game.players.black.uid === socket.userId) {
-              game.players.black.socketId = socket.id;
-            }
-          }
-        }
+        socket.join(roomId);
+        console.log(`♟️ [CHESS] Socket ${socket.id} joined room ${roomId}`);
         if (callback) callback({ success: true });
       });
 
@@ -248,15 +212,7 @@ class ChessGameServer {
       if (callback) callback({ success: false, error: 'Invalid data' });
       return;
     }
-    let { userId, username, avatar, level, betAmount } = data;
-    const parsedBetAmount = Number(betAmount) || 0;
-
-    if (parsedBetAmount < 0) {
-      if (callback) callback({ success: false, error: 'Invalid bet amount' });
-      return;
-    }
-
-    betAmount = parsedBetAmount; // use parsed amount
+    const { userId, username, avatar, level, betAmount } = data;
 
     console.log(`♟️ [CHESS] ${username} searching for match (bet: ${betAmount})`);
     console.log(`♟️ [CHESS] Current queue size: ${this.matchmakingQueue.size}`);
@@ -270,9 +226,9 @@ class ChessGameServer {
 
     // Check and deduct coins before adding to queue
     if (betAmount > 0) {
-      const deductionResult = await this.secureDeductCoins(userId, betAmount);
-      if (!deductionResult.success) {
-        if (callback) callback({ success: false, error: deductionResult.error });
+      const deductionSuccess = await this.secureDeductCoins(userId, betAmount);
+      if (!deductionSuccess) {
+        if (callback) callback({ success: false, error: "Not enough coins or error deducting coins" });
         return;
       }
     }
@@ -333,11 +289,11 @@ class ChessGameServer {
       }
       this.matchmakingIntervals.set(userId, checkInterval);
 
-      // Set up 30-second timeout for AI bot auto-join
+      // Set up 3-second timeout for AI bot auto-join
       const aiTimeoutId = setTimeout(() => {
         // Check if player is still waiting (no match found)
         if (this.matchmakingQueue.has(userId)) {
-          console.log(`♟️ [CHESS] No opponent found after 30 seconds. Creating AI game for ${username}`);
+          console.log(`♟️ [CHESS] No opponent found after 3 seconds. Creating AI game for ${username}`);
           
           // Remove from queue
           this.matchmakingQueue.delete(userId);
@@ -351,7 +307,7 @@ class ChessGameServer {
           // Create AI game
           this.createAIGame(userId, username, avatar, level, betAmount, socket);
         }
-      }, 30000); // 30 seconds
+      }, 3000); // 3 seconds
 
       // Store timeout ID for cleanup
       if (!this.aiTimeouts) {
@@ -579,6 +535,20 @@ class ChessGameServer {
       return;
     }
 
+    // SECURITY: Validate that the socket making the request belongs to one of the players
+    const whitePlayer = game.players.white;
+    const blackPlayer = game.players.black;
+    
+    // Check if socket.userId matches one of the players, OR if socket.id matches the registered socket
+    const isValidWhite = socket.userId === whitePlayer.uid || socket.id === whitePlayer.socketId || socket.id === this.userSockets.get(whitePlayer.uid);
+    const isValidBlack = socket.userId === blackPlayer.uid || socket.id === blackPlayer.socketId || socket.id === this.userSockets.get(blackPlayer.uid);
+
+    if (!isValidWhite && !isValidBlack) {
+      console.warn(`[CHESS] Security Alert: Unauthorized socket ${socket.id} attempted to move in room ${roomId}`);
+      if (callback) callback({ error: 'Unauthorized move' });
+      return;
+    }
+
     const { initializeChessGame, movePiece, getLegalMoves, isCheckmate } = require('./utils/chessLogic');
 
     // Initialize game state if this is the first move/sync
@@ -587,24 +557,6 @@ class ChessGameServer {
       console.log(`♟️ [CHESS] Game state initialized for ${roomId}`);
     }
 
-    const isWhiteTurn = game.gameState.currentTurn === 'white';
-    
-    // SECURITY: Validate that the socket making the request belongs to one of the players
-    const whitePlayer = game.players.white;
-    const blackPlayer = game.players.black;
-    const incomingUserId = data.userId; // We added this in client payload
-    
-    // Check if socket.userId matches one of the players, OR if socket.id matches the registered socket, OR if incomingUserId matches
-    const isValidWhite = socket.userId === whitePlayer.uid || incomingUserId === whitePlayer.uid || socket.id === whitePlayer.socketId || socket.id === this.userSockets.get(whitePlayer.uid);
-    const isValidBlack = socket.userId === blackPlayer.uid || incomingUserId === blackPlayer.uid || socket.id === blackPlayer.socketId || socket.id === this.userSockets.get(blackPlayer.uid);
-
-    if (!isValidWhite && !isValidBlack) {
-      console.warn(`[CHESS] Security Alert: Unauthorized socket ${socket.id} attempted to move in room ${roomId}`);
-      if (callback) callback({ error: 'Unauthorized move' });
-      return;
-    }
-
-    // Update game state with the incoming lastMove object so we can validate it
     const lastMove = gameState?.lastMove;
     if (!lastMove) {
       // Just syncing state (e.g. initial connection), broadcast current state
@@ -612,15 +564,12 @@ class ChessGameServer {
         gameState: game.gameState,
         timestamp: Date.now()
       });
-      // Fallback
-      if (whitePlayer.socketId && whitePlayer.socketId !== socket.id) this.io.to(whitePlayer.socketId).emit('chess:gameUpdate', { gameState: game.gameState, timestamp: Date.now() });
-      if (blackPlayer.socketId && blackPlayer.socketId !== socket.id) this.io.to(blackPlayer.socketId).emit('chess:gameUpdate', { gameState: game.gameState, timestamp: Date.now() });
-      
       if (callback) callback({ success: true, gameState: game.gameState });
       return;
     }
 
     // Is it the player's turn?
+    const isWhiteTurn = game.gameState.currentTurn === 'white';
     if ((isWhiteTurn && !isValidWhite) || (!isWhiteTurn && !isValidBlack)) {
       if (callback) callback({ error: 'Not your turn' });
       return;
@@ -657,20 +606,6 @@ class ChessGameServer {
       gameState: newState,
       timestamp: Date.now()
     });
-    
-    // Fallback explicitly to both sockets
-    if (whitePlayer.socketId) {
-      this.io.to(whitePlayer.socketId).emit('chess:gameUpdate', {
-        gameState: newState,
-        timestamp: Date.now()
-      });
-    }
-    if (blackPlayer.socketId) {
-      this.io.to(blackPlayer.socketId).emit('chess:gameUpdate', {
-        gameState: newState,
-        timestamp: Date.now()
-      });
-    }
 
     console.log(`♟️ [CHESS] Move in ${roomId}: ${lastMove.from} -> ${lastMove.to}`);
 
