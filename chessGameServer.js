@@ -575,10 +575,11 @@ class ChessGameServer {
     // SECURITY: Validate that the socket making the request belongs to one of the players
     const whitePlayer = game.players.white;
     const blackPlayer = game.players.black;
+    const incomingUserId = data.userId; // We added this in client payload
     
-    // Check if socket.userId matches one of the players, OR if socket.id matches the registered socket
-    const isValidWhite = socket.userId === whitePlayer.uid || socket.id === whitePlayer.socketId || socket.id === this.userSockets.get(whitePlayer.uid);
-    const isValidBlack = socket.userId === blackPlayer.uid || socket.id === blackPlayer.socketId || socket.id === this.userSockets.get(blackPlayer.uid);
+    // Check if socket.userId matches one of the players, OR if socket.id matches the registered socket, OR if incomingUserId matches
+    const isValidWhite = socket.userId === whitePlayer.uid || incomingUserId === whitePlayer.uid || socket.id === whitePlayer.socketId || socket.id === this.userSockets.get(whitePlayer.uid);
+    const isValidBlack = socket.userId === blackPlayer.uid || incomingUserId === blackPlayer.uid || socket.id === blackPlayer.socketId || socket.id === this.userSockets.get(blackPlayer.uid);
 
     if (!isValidWhite && !isValidBlack) {
       console.warn(`[CHESS] Security Alert: Unauthorized socket ${socket.id} attempted to move in room ${roomId}`);
