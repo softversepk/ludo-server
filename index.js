@@ -1139,6 +1139,12 @@ app.post('/api/game-invite/send', strictLimiter, authenticateFinancialRequest, a
 
     const rtdb = admin.database();
     const db = admin.firestore();
+    
+    const parsedBetAmount = Number(gameData.betAmount) || 0;
+    if (parsedBetAmount < 0) {
+      throw new Error('Invalid bet amount');
+    }
+    gameData.betAmount = parsedBetAmount;
 
     // Verify sender exists and has enough balance if betAmount > 0
     let senderData;
@@ -3107,16 +3113,22 @@ const generateRoomCode = () => {
 
 // Helper to securely deduct coins
 const secureDeductCoins = async (userId, amount) => {
-  if (!amount || amount <= 0) return true;
+  if (!userId) {
+    console.error(`[SECURITY] Coin deduction failed: Missing userId`);
+    return false;
+  }
+  const parsedAmount = Number(amount);
+  if (isNaN(parsedAmount) || parsedAmount <= 0) return true;
+  
   try {
     const userRef = admin.firestore().collection('users').doc(userId);
     return await admin.firestore().runTransaction(async (transaction) => {
       const userDoc = await transaction.get(userRef);
       if (!userDoc.exists) throw new Error('User not found');
-      const currentCoins = userDoc.data().coins || 0;
-      if (currentCoins < amount) throw new Error('Not enough coins');
+      const currentCoins = Number(userDoc.data().coins) || 0;
+      if (currentCoins < parsedAmount) throw new Error(`Not enough coins. Has ${currentCoins}, needs ${parsedAmount}`);
       transaction.update(userRef, {
-        coins: admin.firestore.FieldValue.increment(-amount)
+        coins: admin.firestore.FieldValue.increment(-parsedAmount)
       });
       return true;
     });
@@ -3128,11 +3140,14 @@ const secureDeductCoins = async (userId, amount) => {
 
 // Helper to securely refund coins
 const secureRefundCoins = async (userId, amount) => {
-  if (!amount || amount <= 0) return true;
+  if (!userId) return false;
+  const parsedAmount = Number(amount);
+  if (isNaN(parsedAmount) || parsedAmount <= 0) return true;
+  
   try {
     const userRef = admin.firestore().collection('users').doc(userId);
     await userRef.update({
-      coins: admin.firestore.FieldValue.increment(amount)
+      coins: admin.firestore.FieldValue.increment(parsedAmount)
     });
     return true;
   } catch (error) {
@@ -3186,7 +3201,12 @@ io.on("connection", (socket) => {
 
   // CREATE ROOM
   socket.on("create_room", async (hostData, callback) => {
-    const betAmount = hostData.betAmount || 100;
+    let betAmount = Number(hostData.betAmount) || 100;
+    
+    if (betAmount < 0) {
+      if (callback) callback({ success: false, error: "Invalid bet amount" });
+      return;
+    }
     
     // Check and deduct coins before creating room
     if (betAmount > 0) {
@@ -3196,6 +3216,8 @@ io.on("connection", (socket) => {
         return;
       }
     }
+    
+    hostData.betAmount = betAmount;
 
     const roomCode = generateRoomCode();
 
@@ -3261,7 +3283,7 @@ io.on("connection", (socket) => {
       return;
     }
 
-    const betAmount = room.betAmount || 100;
+    const betAmount = Number(room.betAmount) || 100;
     
     // Check and deduct coins before joining room
     if (betAmount > 0) {
@@ -3336,15 +3358,23 @@ io.on("connection", (socket) => {
     });
 
     const { mode, betAmount } = playerData;
+    const parsedBetAmount = Number(betAmount) || 0;
+    
+    if (parsedBetAmount < 0) {
+      if (callback) callback({ success: false, error: "Invalid bet amount" });
+      return;
+    }
     
     // Check and deduct coins before proceeding with matchmaking
-    if (betAmount > 0) {
-      const deductionSuccess = await secureDeductCoins(playerData.uid, betAmount);
+    if (parsedBetAmount > 0) {
+      const deductionSuccess = await secureDeductCoins(playerData.uid, parsedBetAmount);
       if (!deductionSuccess) {
         if (callback) callback({ success: false, error: "Not enough coins or error deducting coins" });
         return;
       }
     }
+
+    playerData.betAmount = parsedBetAmount; // ensure it's a number for further logic
 
     let joinedRoomCode = null;
 
