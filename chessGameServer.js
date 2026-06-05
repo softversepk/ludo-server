@@ -16,7 +16,7 @@ class ChessGameServer {
     this.setupEventHandlers();
   }
 
-  // Helper to securely deduct coinsS
+  // Helper to securely deduct coins
   async secureDeductCoins(userId, amount) {
     if (!amount || amount <= 0) return true;
     try {
@@ -61,14 +61,6 @@ class ChessGameServer {
         this.userSockets.set(userId, socket.id);
         socket.userId = userId;
         console.log(`♟️ [CHESS] User registered: ${userId} -> ${socket.id}`);
-        
-        // Auto-join active game rooms
-        for (const [roomId, game] of this.activeGames.entries()) {
-          if (game.players.white.uid === userId || game.players.black.uid === userId) {
-            socket.join(roomId);
-            console.log(`♟️ [CHESS] Auto-joined socket ${socket.id} to room ${roomId}`);
-          }
-        }
       });
 
       // Join room (for players navigating to game screen)
@@ -124,10 +116,6 @@ class ChessGameServer {
       // Get AI move for local games
       socket.on('chess:get_ai_move', (data, callback) => {
         try {
-          if (!data || !data.gameState) {
-            if (callback) callback({ success: false, error: 'Invalid data' });
-            return;
-          }
           const { gameState } = data;
           const { getLegalMoves, movePiece, isCheckmate } = require('./utils/chessLogic');
           const { pieces, currentTurn } = gameState;
@@ -208,10 +196,6 @@ class ChessGameServer {
   }
 
   async handleFindMatch(socket, data, callback) {
-    if (!data) {
-      if (callback) callback({ success: false, error: 'Invalid data' });
-      return;
-    }
     const { userId, username, avatar, level, betAmount } = data;
 
     console.log(`♟️ [CHESS] ${username} searching for match (bet: ${betAmount})`);
@@ -472,7 +456,7 @@ class ChessGameServer {
         } : {
           uid: 'ai_bot',
           username: aiName,
-          avatar: 'https://ui-avatars.com/api/?name=AI&background=random',
+          avatar: 'https://via.placeholder.com/100?text=AI',
           level: level + 2,
           socketId: null,
           isAI: true
@@ -487,7 +471,7 @@ class ChessGameServer {
         } : {
           uid: 'ai_bot',
           username: aiName,
-          avatar: 'https://ui-avatars.com/api/?name=AI&background=random',
+          avatar: 'https://via.placeholder.com/100?text=AI',
           level: level + 2,
           socketId: null,
           isAI: true
@@ -517,16 +501,7 @@ class ChessGameServer {
   }
 
   handleMakeMove(socket, data, callback) {
-    if (!data) {
-      if (callback) callback({ error: 'Invalid data' });
-      return;
-    }
     const { roomId, gameState } = data;
-    if (!roomId) {
-      if (callback) callback({ error: 'Room ID required' });
-      return;
-    }
-
     const game = this.activeGames.get(roomId);
 
     if (!game) {
@@ -536,91 +511,45 @@ class ChessGameServer {
     }
 
     // SECURITY: Validate that the socket making the request belongs to one of the players
-    const whitePlayer = game.players.white;
-    const blackPlayer = game.players.black;
-    
-    // Check if socket.userId matches one of the players, OR if socket.id matches the registered socket
-    const isValidWhite = socket.userId === whitePlayer.uid || socket.id === whitePlayer.socketId || socket.id === this.userSockets.get(whitePlayer.uid);
-    const isValidBlack = socket.userId === blackPlayer.uid || socket.id === blackPlayer.socketId || socket.id === this.userSockets.get(blackPlayer.uid);
-
-    if (!isValidWhite && !isValidBlack) {
+    const whiteSocketId = game.players.white.socketId;
+    const blackSocketId = game.players.black.socketId;
+    if (socket.id !== whiteSocketId && socket.id !== blackSocketId) {
       console.warn(`[CHESS] Security Alert: Unauthorized socket ${socket.id} attempted to move in room ${roomId}`);
       if (callback) callback({ error: 'Unauthorized move' });
       return;
     }
 
-    const { initializeChessGame, movePiece, getLegalMoves, isCheckmate } = require('./utils/chessLogic');
-
     // Initialize game state if this is the first move/sync
     if (!game.gameState) {
-      game.gameState = initializeChessGame();
+      game.gameState = gameState;
       console.log(`♟️ [CHESS] Game state initialized for ${roomId}`);
-    }
-
-    const lastMove = gameState?.lastMove;
-    if (!lastMove) {
-      // Just syncing state (e.g. initial connection), broadcast current state
-      socket.to(roomId).emit('chess:gameUpdate', {
-        gameState: game.gameState,
-        timestamp: Date.now()
-      });
-      if (callback) callback({ success: true, gameState: game.gameState });
-      return;
-    }
-
-    // Is it the player's turn?
-    const isWhiteTurn = game.gameState.currentTurn === 'white';
-    if ((isWhiteTurn && !isValidWhite) || (!isWhiteTurn && !isValidBlack)) {
-      if (callback) callback({ error: 'Not your turn' });
-      return;
-    }
-
-    const movingPiece = game.gameState.pieces.find(p => p.position === lastMove.from);
-    if (!movingPiece || movingPiece.color !== game.gameState.currentTurn) {
-      if (callback) callback({ error: 'Invalid move: piece not found or wrong color' });
-      return;
-    }
-
-    // Validate if the move is legal
-    const legalMoves = getLegalMoves(movingPiece, game.gameState.pieces);
-    if (!legalMoves.includes(lastMove.to)) {
-      console.warn(`[CHESS] Security Alert: Illegal move attempted ${lastMove.from} -> ${lastMove.to} by ${socket.id}`);
-      if (callback) callback({ error: 'Illegal move' });
-      return;
-    }
-
-    // Apply move on backend securely
-    const newState = movePiece(game.gameState, lastMove.from, lastMove.to);
-    
-    // Check for checkmate
-    if (isCheckmate(newState.pieces, newState.currentTurn)) {
-      newState.isCheckmate = true;
+    } else {
+      // Update game state with new move
+      game.gameState = gameState;
     }
     
-    game.gameState = newState;
     game.lastUpdate = Date.now();
 
-    // Broadcast to both players (including sender, or rather sender updates locally but this ensures sync)
-    // We must ensure the socket explicitly broadcasts to the room
-    this.io.to(roomId).emit('chess:gameUpdate', {
-      gameState: newState,
+    // Broadcast to both players
+    // We must ensure the socket explicitly broadcasts to the room using `socket.to(roomId).emit` 
+    // or `this.io.to(roomId).emit`, since `this.io.to(roomId)` works for sending it to everyone.
+    socket.to(roomId).emit('chess:gameUpdate', {
+      gameState,
       timestamp: Date.now()
     });
 
-    console.log(`♟️ [CHESS] Move in ${roomId}: ${lastMove.from} -> ${lastMove.to}`);
+    console.log(`♟️ [CHESS] Move in ${roomId}: ${gameState.lastMove?.from} -> ${gameState.lastMove?.to}`);
 
-    if (callback) callback({ success: true, gameState: newState });
+    if (callback) callback({ success: true });
 
     // Check for checkmate
-    if (newState.isCheckmate) {
-      this.handleGameEnd(roomId, newState);
+    if (gameState.isCheckmate) {
+      this.handleGameEnd(roomId, gameState);
     }
   }
 
-  handleTriggerBot(socket, data) {
-    if (!data || !data.roomId) return;
+  handleTriggerBot(socket, { roomId }) {
     try {
-      const { roomId } = data;
       const game = this.activeGames.get(roomId);
       if (!game || !game.gameState) return;
 
@@ -686,15 +615,7 @@ class ChessGameServer {
   }
 
   handleResign(socket, data, callback) {
-    if (!data) {
-      if (callback) callback({ error: 'Invalid data' });
-      return;
-    }
     const { roomId, resigningPlayerId, betAmount } = data;
-    if (!roomId) {
-      if (callback) callback({ error: 'Room ID required' });
-      return;
-    }
     const game = this.activeGames.get(roomId);
 
     if (!game) {
@@ -743,15 +664,7 @@ class ChessGameServer {
   }
 
   handleLeaveGame(socket, data, callback) {
-    if (!data) {
-      if (callback) callback({ error: 'Invalid data' });
-      return;
-    }
     const { roomId, playerId, betAmount } = data;
-    if (!roomId) {
-      if (callback) callback({ error: 'Room ID required' });
-      return;
-    }
     const game = this.activeGames.get(roomId);
 
     if (!game) {
