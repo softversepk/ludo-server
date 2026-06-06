@@ -1312,6 +1312,107 @@ app.post('/api/game-invite/send', strictLimiter, authenticateFinancialRequest, a
   }
 });
 
+// Secure endpoint to invite a specific buddy to an existing room
+app.post('/api/game-invite/invite-buddy-to-existing-room', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { toUserId, gameData, roomCode } = req.body;
+    const fromUserId = req.userId;
+
+    if (!toUserId || !gameData || !roomCode) {
+      return res.status(400).json({ error: 'Invalid invite data' });
+    }
+    
+    if (toUserId === fromUserId) {
+      return res.status(400).json({ error: 'Cannot send invite to yourself' });
+    }
+
+    const rtdb = admin.database();
+    const db = admin.firestore();
+
+    // Verify sender exists
+    const senderDoc = await db.collection('users').doc(fromUserId).get();
+    if (!senderDoc.exists) {
+      throw new Error('Sender not found');
+    }
+    const senderData = senderDoc.data();
+
+    // Verify receiver exists
+    const receiverDoc = await db.collection('users').doc(toUserId).get();
+    if (!receiverDoc.exists) {
+      throw new Error('Receiver not found');
+    }
+
+    // Verify room exists and sender is host (or at least create it if it doesn't exist, similar to club invite)
+    let roomData;
+    const roomRef = rtdb.ref(`gameRooms/${roomCode}`);
+    const roomSnapshot = await roomRef.once('value');
+    
+    if (!roomSnapshot.exists()) {
+      // Room doesn't exist yet, we create it.
+      roomData = {
+        id: roomCode,
+        status: 'waiting',
+        createdAt: admin.database.ServerValue.TIMESTAMP,
+        host: fromUserId,
+        mode: 'friends',
+        playerCount: 1,
+        maxPlayers: 2, // Will be incremented
+        betAmount: Number(gameData.betAmount || 0),
+        gameType: String(gameData.gameType || 'unknown'),
+        gameMode: String(gameData.gameMode || 'classic'),
+        players: {
+          [fromUserId]: {
+            username: senderData.username,
+            avatar: senderData.avatar || 'default',
+            isReady: false
+          }
+        }
+      };
+      await roomRef.set(roomData);
+    } else {
+      roomData = roomSnapshot.val();
+      if (roomData.host !== fromUserId) {
+        throw new Error('Only the room host can invite more buddies');
+      }
+      // Update maxPlayers
+      await roomRef.update({
+        maxPlayers: (roomData.maxPlayers || 2) + 1
+      });
+    }
+
+    // Since it's to an existing room, the sender already paid the bet amount for their own seat.
+    // They don't pay for the buddy's seat. So we don't deduct coins from sender here.
+    
+    const inviteRef = rtdb.ref(`gameInvites/${toUserId}`).push();
+    const inviteDataToSave = {
+      id: inviteRef.key,
+      fromUserId: fromUserId,
+      fromUsername: senderData.username || gameData.fromUsername || 'Player',
+      fromAvatar: senderData.avatar || gameData.fromAvatar || 'default',
+      toUserId: toUserId,
+      gameType: String(gameData.gameType || roomData?.gameType || 'unknown'),
+      gameName: String(gameData.gameName || 'Game'),
+      betAmount: Number(gameData.betAmount || roomData?.betAmount || 0),
+      roomCode: String(roomCode),
+      gameMode: String(gameData.gameMode || roomData?.gameMode || 'classic'),
+      status: 'pending',
+      timestamp: admin.database.ServerValue.TIMESTAMP,
+      expiresAt: Date.now() + 60000
+    };
+
+    await inviteRef.set(inviteDataToSave);
+
+    res.status(200).json({ 
+      success: true, 
+      inviteId: inviteRef.key,
+      roomCode: roomCode
+    });
+  } catch (error) {
+    console.error('Error sending game invite to existing room:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
 // Secure 1-on-1 Game Invite Cancel Endpoint
 app.post('/api/game-invite/cancel', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
