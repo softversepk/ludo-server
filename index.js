@@ -17,7 +17,7 @@ const admin = require('firebase-admin');
 // Initialize Firebase Admin (Required for secure backend operations like XP and Economy)
 try {
   if (!admin.apps.length) {
-    const databaseURL = process.env.FIREBASE_DATABASE_URL || "https://ecommerce-1eeb2-default-rtdb.firebaseio.com";
+    const databaseURL = process.env.FIREBASE_DATABASE_URL || "https://customer-abe40-default-rtdb.firebaseio.com";
     if (process.env.FIREBASE_SERVICE_ACCOUNT) {
       // Parse the JSON string from environment variable (useful for Railway)
       const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
