@@ -1056,6 +1056,89 @@ app.post('/api/club/send-invite', strictLimiter, authenticateFinancialRequest, a
   }
 });
 
+// Securely invite club members to an existing game room
+app.post('/api/club/invite-to-existing-room', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { roomCode, inviteData } = req.body;
+    const userId = req.userId;
+
+    if (!roomCode || !inviteData) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const db = admin.firestore();
+    const rtdb = admin.database();
+
+    // Verify membership
+    const userDoc = await db.collection('users').doc(userId).get();
+    if (!userDoc.exists) {
+      throw new Error('User not found');
+    }
+    
+    const userData = userDoc.data();
+    const clubId = userData.clubId;
+    
+    if (!clubId) {
+      throw new Error('Not a member of any club');
+    }
+
+    // Verify room exists and user is host
+    const roomSnapshot = await rtdb.ref(`gameRooms/${roomCode}`).once('value');
+    if (!roomSnapshot.exists()) {
+      throw new Error('Room not found');
+    }
+    
+    const roomData = roomSnapshot.val();
+    if (roomData.host !== userId) {
+      throw new Error('Only the room host can invite club members');
+    }
+
+    // Get club members
+    const membersSnapshot = await db.collection('users').where('clubId', '==', clubId).get();
+    const recipientMembers = [];
+    membersSnapshot.forEach(doc => {
+      if (doc.id !== userId) recipientMembers.push(doc.id);
+    });
+
+    if (recipientMembers.length === 0) {
+      throw new Error('No other members in the club');
+    }
+
+    // Send invites
+    const promises = recipientMembers.map(memberId => {
+      const inviteRef = rtdb.ref(`gameInvites/${memberId}`).push();
+      return inviteRef.set({
+        id: inviteRef.key,
+        fromUserId: userId,
+        fromUsername: userData.username,
+        fromAvatar: userData.avatar || 'default',
+        toUserId: memberId,
+        gameType: String(inviteData.gameType || roomData.gameType || 'unknown'),
+        gameName: String(inviteData.gameName || 'Game'),
+        betAmount: Number(inviteData.betAmount || roomData.betAmount || 0),
+        roomCode: roomCode,
+        clubId: clubId,
+        gameMode: String(inviteData.gameMode || roomData.gameMode || 'classic'),
+        isClubInvite: true,
+        status: 'pending',
+        timestamp: admin.database.ServerValue.TIMESTAMP,
+        expiresAt: Date.now() + 60000
+      });
+    });
+
+    await Promise.all(promises);
+
+    res.status(200).json({ 
+      success: true, 
+      totalMembers: recipientMembers.length + 1,
+      invitedMembers: recipientMembers.length
+    });
+  } catch (error) {
+    console.error('Error sending club invite to existing room:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
 // Securely cancel club game invite
 app.post('/api/club/cancel-invite', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
