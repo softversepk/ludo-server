@@ -2844,37 +2844,16 @@ app.post('/api/friends/details', strictLimiter, authenticateFinancialRequest, as
     const { friendIds } = req.body;
     if (!Array.isArray(friendIds)) return res.status(400).json({ success: false, error: 'Invalid friendIds array' });
 
-    const db = admin.firestore();
     const friendsData = [];
     
-    const clubNamesCache = {};
-    const getClubName = async (clubId) => {
-      if (!clubId) return null;
-      if (clubNamesCache[clubId] !== undefined) return clubNamesCache[clubId];
-      try {
-        const clubDoc = await db.collection('clubs').doc(clubId).get();
-        clubNamesCache[clubId] = clubDoc.exists ? (clubDoc.data().name || null) : null;
-      } catch (err) {
-        clubNamesCache[clubId] = null;
-      }
-      return clubNamesCache[clubId];
-    };
-
     const promises = friendIds.map(async (id) => {
-      const docSnap = await db.collection('users').doc(id).get();
-      if (docSnap.exists) {
-        const data = docSnap.data();
-        const clubName = data.clubId ? await getClubName(data.clubId) : null;
+      const profile = await getCachedUserProfile(id);
+      if (profile) {
+        // Only override status based on socket presence
+        const isOnline = !!userSockets[id];
         friendsData.push({
-          id: docSnap.id,
-          name: data.username || data.displayName || 'Unknown',
-          avatar: data.avatar || 'default',
-          level: data.level || 1,
-          club: clubName,
-          status: 'offline', // Default, logic on client or we can determine here
-          lastActive: data.lastActive,
-          currentGame: data.currentGame || null,
-          settings: data.settings || {}
+          ...profile,
+          status: isOnline ? (profile.currentGame ? 'in_game' : 'online') : 'offline'
         });
       }
     });
@@ -3248,6 +3227,51 @@ const userSockets = {};
 // Global userId → roomCode map (to rejoin rooms after reconnect)
 const userRooms = {};
 
+// In-memory cache for user profiles to save Firestore reads
+const userProfileCache = new Map();
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+// Helper to get cached or fresh user profile
+const getCachedUserProfile = async (userId) => {
+  const cached = userProfileCache.get(userId);
+  if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
+    return cached.data;
+  }
+  
+  try {
+    const db = admin.firestore();
+    const docSnap = await db.collection('users').doc(userId).get();
+    if (docSnap.exists) {
+      const data = docSnap.data();
+      
+      let clubName = null;
+      if (data.clubId) {
+        try {
+          const clubDoc = await db.collection('clubs').doc(data.clubId).get();
+          if (clubDoc.exists) clubName = clubDoc.data().name;
+        } catch (e) { }
+      }
+      
+      const profile = {
+        id: docSnap.id,
+        name: data.username || data.displayName || 'Unknown',
+        avatar: data.avatar || 'default',
+        level: data.level || 1,
+        club: clubName,
+        lastActive: data.lastActive,
+        currentGame: data.currentGame || null,
+        settings: data.settings || {}
+      };
+      
+      userProfileCache.set(userId, { data: profile, timestamp: Date.now() });
+      return profile;
+    }
+  } catch (error) {
+    console.error(`[CACHE] Error fetching profile for ${userId}:`, error);
+  }
+  return null;
+};
+
 // Grace-period timers: roomCode → setTimeout id
 // Rooms in "game_over" state are kept alive briefly so late updates don't error
 const roomDeleteTimers = {};
@@ -3361,8 +3385,12 @@ io.on("connection", (socket) => {
   // the latest socketId even after a reconnect
   socket.on("register_user", (userId) => {
     if (!userId) return;
+    socket.userId = userId; // Keep track of userId on this socket
     userSockets[userId] = socket.id;
     console.log(`[REGISTER] ${userId} → socket ${socket.id}`);
+
+    // Broadcast online status to anyone subscribing to this user's presence
+    io.to(`presence:${userId}`).emit("friend_status_change", { id: userId, status: "online" });
 
     // Auto-rejoin any room this user was in
     const roomCode = userRooms[userId];
@@ -3395,6 +3423,39 @@ io.on("connection", (socket) => {
     } else {
       console.log(`[REJOIN] Room ${roomCode} not found for user ${userId}`);
     }
+  });
+
+  // FRIEND SUBSCRIPTION (WebSockets instead of RTDB/Firestore polling)
+  socket.on("subscribe_friends", async (friendIds) => {
+    if (!Array.isArray(friendIds)) return;
+    
+    // Join presence rooms so this socket receives real-time online/offline updates
+    friendIds.forEach(id => {
+      socket.join(`presence:${id}`);
+    });
+
+    const friendsData = [];
+    const promises = friendIds.map(async (id) => {
+      const profile = await getCachedUserProfile(id);
+      if (profile) {
+        const isOnline = !!userSockets[id];
+        friendsData.push({
+          ...profile,
+          status: isOnline ? (profile.currentGame ? 'in_game' : 'online') : 'offline'
+        });
+      }
+    });
+    
+    await Promise.all(promises);
+    socket.emit("friends_update", friendsData);
+  });
+
+  // UN-SUBSCRIBE FRIENDS
+  socket.on("unsubscribe_friends", (friendIds) => {
+    if (!Array.isArray(friendIds)) return;
+    friendIds.forEach(id => {
+      socket.leave(`presence:${id}`);
+    });
   });
 
   // CREATE ROOM
@@ -4704,6 +4765,19 @@ io.on("connection", (socket) => {
   // ============================================
   // END GAME CHAT EVENT HANDLERS
   // ============================================
+
+  socket.on("disconnect", () => {
+    console.log("User disconnected:", socket.id);
+    if (socket.userId) {
+      // Small timeout to allow for instant reconnects without flashing offline
+      setTimeout(() => {
+        if (userSockets[socket.userId] === socket.id) {
+          delete userSockets[socket.userId];
+          io.to(`presence:${socket.userId}`).emit("friend_status_change", { id: socket.userId, status: "offline" });
+        }
+      }, 3000);
+    }
+  });
 });
 
 const PORT = process.env.PORT || 3000;
