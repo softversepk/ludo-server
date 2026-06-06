@@ -1083,14 +1083,43 @@ app.post('/api/club/invite-to-existing-room', strictLimiter, authenticateFinanci
     }
 
     // Verify room exists and user is host
-    const roomSnapshot = await rtdb.ref(`gameRooms/${roomCode}`).once('value');
-    if (!roomSnapshot.exists()) {
-      throw new Error('Room not found');
-    }
+    // Sometimes roomCode comes from `gameRooms` sometimes it's passed but not created yet if created locally first.
+    // However, the standard flow is that `gameRooms/${roomCode}` must exist for inviting to an existing room.
+    // Wait, in `send-invite`, it creates the room on the server. If this is an existing room, it should be in `gameRooms`.
+    // Let's modify to create the room if it doesn't exist, similar to how send-invite works.
     
-    const roomData = roomSnapshot.val();
-    if (roomData.host !== userId) {
-      throw new Error('Only the room host can invite club members');
+    let roomData;
+    const roomRef = rtdb.ref(`gameRooms/${roomCode}`);
+    const roomSnapshot = await roomRef.once('value');
+    
+    if (!roomSnapshot.exists()) {
+      // Room doesn't exist yet, we create it.
+      roomData = {
+        id: roomCode,
+        status: 'waiting',
+        createdAt: admin.database.ServerValue.TIMESTAMP,
+        host: userId,
+        mode: 'club',
+        clubId: clubId,
+        playerCount: 1,
+        maxPlayers: 2, // Default, will be updated below
+        betAmount: Number(inviteData.betAmount || 0),
+        gameType: String(inviteData.gameType || 'unknown'),
+        gameMode: String(inviteData.gameMode || 'classic'),
+        players: {
+          [userId]: {
+            username: userData.username,
+            avatar: userData.avatar || 'default',
+            isReady: false
+          }
+        }
+      };
+      await roomRef.set(roomData);
+    } else {
+      roomData = roomSnapshot.val();
+      if (roomData.host !== userId) {
+        throw new Error('Only the room host can invite club members');
+      }
     }
 
     // Get club members
@@ -1103,6 +1132,11 @@ app.post('/api/club/invite-to-existing-room', strictLimiter, authenticateFinanci
     if (recipientMembers.length === 0) {
       throw new Error('No other members in the club');
     }
+
+    // Update maxPlayers if room was just created or if we want to expand it
+    await roomRef.update({
+      maxPlayers: recipientMembers.length + 1
+    });
 
     // Send invites
     const promises = recipientMembers.map(memberId => {
