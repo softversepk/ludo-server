@@ -1256,7 +1256,7 @@ app.post('/api/game-invite/send', strictLimiter, authenticateFinancialRequest, a
     const rtdb = admin.database();
     const db = admin.firestore();
 
-    // Verify sender exists
+    // Verify sender exists and has enough balance if betAmount > 0
     let senderData;
     await db.runTransaction(async (transaction) => {
       const senderRef = db.collection('users').doc(fromUserId);
@@ -1266,7 +1266,14 @@ app.post('/api/game-invite/send', strictLimiter, authenticateFinancialRequest, a
       }
       
       senderData = senderDoc.data();
-      // Note: Coin deduction is handled by socket create_room event to prevent double deduction
+      if (gameData.betAmount > 0) {
+        if ((senderData.coins || 0) < gameData.betAmount) {
+          throw new Error('Insufficient coins to send this invite');
+        }
+        transaction.update(senderRef, {
+          coins: admin.firestore.FieldValue.increment(-gameData.betAmount)
+        });
+      }
     });
 
     // Verify receiver exists
@@ -1484,15 +1491,24 @@ app.post('/api/game-invite/accept', strictLimiter, authenticateFinancialRequest,
       return res.status(400).json({ error: 'Invite expired' });
     }
 
-    // SECURITY CHECK: Verify the room still exists before deducting coins
-    // If the host disconnected, the room might have been destroyed.
-    if (inviteData.roomCode && !rooms[inviteData.roomCode]) {
-      await inviteRef.remove();
-      return res.status(400).json({ error: 'The game room is no longer available. The host may have left.' });
-    }
-
-    // Note: Coin deduction is handled by socket join_room event to prevent double deduction
+    // Check if user has enough coins to accept the bet
     const betAmount = Number(inviteData.betAmount || 0);
+    if (betAmount > 0) {
+      const userRef = db.collection('users').doc(userId);
+      await db.runTransaction(async (transaction) => {
+        const userDoc = await transaction.get(userRef);
+        if (!userDoc.exists) {
+          throw new Error('User not found');
+        }
+        const userData = userDoc.data();
+        if ((userData.coins || 0) < betAmount) {
+          throw new Error('Insufficient coins to accept this invite');
+        }
+        transaction.update(userRef, {
+          coins: admin.firestore.FieldValue.increment(-betAmount)
+        });
+      });
+    }
 
     await inviteRef.update({ status: 'accepted' });
     await inviteRef.remove();
