@@ -240,13 +240,20 @@ class LudoGameServer {
         return;
       }
 
-      // SECURITY: Ensure 4 players for teamup and 4p games
+      // SECURITY: Ensure correct player count to prevent hackers from starting games alone
       const isFourPlayer = room.isTeamMode || room.gameMode === 'team' || room.gameMode === 'ludo_teamup' || room.gameMode === 'ludo_4p' || room.mode === 'ludo_teamup' || room.mode === 'ludo_4p' || room.maxPlayers === 4;
+      const currentPlayersCount = Object.keys(room.players).length;
+      
       if (isFourPlayer) {
-        const currentPlayers = Object.keys(room.players).length;
-        if (currentPlayers < 4) {
-          console.warn(`[SECURITY] Blocked hacked start_game: Host tried to start a 4-player game with only ${currentPlayers} players`);
+        if (currentPlayersCount < 4) {
+          console.warn(`[SECURITY] Blocked hacked start_game: Host tried to start a 4-player game with only ${currentPlayersCount} players`);
           socket.emit('ludo:start_error', { error: 'This game mode requires exactly 4 players to start.' });
+          return;
+        }
+      } else {
+        if (currentPlayersCount < 2) {
+          console.warn(`[SECURITY] Blocked hacked start_game: Host tried to start a 2-player game with only ${currentPlayersCount} players`);
+          socket.emit('ludo:start_error', { error: 'This game mode requires at least 2 players to start.' });
           return;
         }
       }
