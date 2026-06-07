@@ -4253,6 +4253,17 @@ io.on("connection", (socket) => {
   socket.on("start_game", ({ roomCode, gameState }) => {
     const room = rooms[roomCode];
     if (room) {
+      // SECURITY: If it's a 4-player game (like Ludo TeamUp or Ludo 4P), require exactly 4 players.
+      const isFourPlayer = room.gameType === 'ludo_teamup' || room.gameType === 'ludo_4p' || room.mode === 'ludo_teamup' || room.gameMode === 'ludo_teamup' || room.gameMode === 'ludo_4p' || room.maxPlayers === 4;
+      if (isFourPlayer) {
+         const currentPlayers = Object.keys(room.players).length;
+         if (currentPlayers < 4) {
+             console.warn(`[SECURITY] Blocked hacked start_game: Host tried to start a 4-player game with only ${currentPlayers} players`);
+             socket.emit("action_error", { error: "This game mode requires exactly 4 players to start." });
+             return;
+         }
+      }
+
       console.log(`[SERVER] Starting game for room ${roomCode}`);
       room.status = "playing";
       
