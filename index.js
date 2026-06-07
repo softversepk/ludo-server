@@ -4253,13 +4253,28 @@ io.on("connection", (socket) => {
   socket.on("start_game", ({ roomCode, gameState }) => {
     const room = rooms[roomCode];
     if (room) {
-      // SECURITY: If it's a 4-player game (like Ludo TeamUp or Ludo 4P), require exactly 4 players.
-      const isFourPlayer = room.gameType === 'ludo_teamup' || room.gameType === 'ludo_4p' || room.mode === 'ludo_teamup' || room.gameMode === 'ludo_teamup' || room.gameMode === 'ludo_4p' || room.maxPlayers === 4;
-      if (isFourPlayer) {
-         const currentPlayers = Object.keys(room.players).length;
+      // SECURITY: If it's Ludo TeamUp, require exactly 4 players.
+      const isTeamUp = room.gameType === 'ludo_teamup' || room.mode === 'ludo_teamup' || room.gameMode === 'ludo_teamup' || room.isTeamMode;
+      const isLudo4P = room.gameType === 'ludo_4p' || room.mode === 'ludo_4p' || room.gameMode === 'ludo_4p';
+      
+      const currentPlayers = Object.keys(room.players).length;
+      
+      if (isTeamUp) {
          if (currentPlayers < 4) {
+             console.warn(`[SECURITY] Blocked hacked start_game: Host tried to start a TeamUp game with only ${currentPlayers} players`);
+             socket.emit("action_error", { error: "TeamUp mode requires exactly 4 players to start." });
+             return;
+         }
+      } else if (isLudo4P || room.maxPlayers === 4) {
+         if (currentPlayers < 2) {
              console.warn(`[SECURITY] Blocked hacked start_game: Host tried to start a 4-player game with only ${currentPlayers} players`);
-             socket.emit("action_error", { error: "This game mode requires exactly 4 players to start." });
+             socket.emit("action_error", { error: "At least 2 players are required to start the game." });
+             return;
+         }
+      } else {
+         if (currentPlayers < 2) {
+             console.warn(`[SECURITY] Blocked hacked start_game: Host tried to start game with only ${currentPlayers} players`);
+             socket.emit("action_error", { error: "At least 2 players are required to start the game." });
              return;
          }
       }
