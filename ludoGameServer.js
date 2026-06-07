@@ -211,7 +211,11 @@ class LudoGameServer {
 
       // Check if all players are ready
       const allReady = Object.values(room.players).every(p => p.ready);
-      if (allReady && Object.keys(room.players).length >= 2) {
+      
+      const isFourPlayer = room.isTeamMode || room.gameMode === 'team' || room.gameMode === 'ludo_teamup' || room.gameMode === 'ludo_4p' || room.mode === 'ludo_teamup' || room.mode === 'ludo_4p' || room.maxPlayers === 4;
+      const requiredPlayers = isFourPlayer ? 4 : 2;
+
+      if (allReady && Object.keys(room.players).length >= requiredPlayers) {
         this.io.to(roomId).emit('ludo:all_ready', { canStart: true });
       }
     } catch (error) {
@@ -234,6 +238,17 @@ class LudoGameServer {
       if (!allReady) {
         socket.emit('ludo:start_error', { error: 'Not all players are ready' });
         return;
+      }
+
+      // SECURITY: Ensure 4 players for teamup and 4p games
+      const isFourPlayer = room.isTeamMode || room.gameMode === 'team' || room.gameMode === 'ludo_teamup' || room.gameMode === 'ludo_4p' || room.mode === 'ludo_teamup' || room.mode === 'ludo_4p' || room.maxPlayers === 4;
+      if (isFourPlayer) {
+        const currentPlayers = Object.keys(room.players).length;
+        if (currentPlayers < 4) {
+          console.warn(`[SECURITY] Blocked hacked start_game: Host tried to start a 4-player game with only ${currentPlayers} players`);
+          socket.emit('ludo:start_error', { error: 'This game mode requires exactly 4 players to start.' });
+          return;
+        }
       }
 
       // Initialize turn order
