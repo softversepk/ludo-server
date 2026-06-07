@@ -1281,7 +1281,6 @@ class LudoGameServer {
 
     this.io.to(roomId).emit('ludo:room_update', {
       players: this.getPlayersInfo(room),
-      maxPlayers: room.maxPlayers,
       timestamp: Date.now()
     });
   }
