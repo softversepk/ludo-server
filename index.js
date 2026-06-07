@@ -2844,9 +2844,21 @@ app.post('/api/friends/details', strictLimiter, authenticateFinancialRequest, as
     const { friendIds } = req.body;
     if (!Array.isArray(friendIds)) return res.status(400).json({ success: false, error: 'Invalid friendIds array' });
 
+    // Secure check: verify that the requested friendIds are actually friends of the user
+    const db = admin.firestore();
+    const userDoc = await db.collection('users').doc(req.userId).get();
+    const userFriends = userDoc.exists ? (userDoc.data().friends || []) : [];
+    
+    // Filter out any IDs that are not in the user's friend list
+    const validFriendIds = friendIds.filter(id => userFriends.includes(id));
+    
+    if (validFriendIds.length === 0 && friendIds.length > 0) {
+      console.warn(`🔒 [SECURITY] User ${req.userId} attempted to fetch details of non-friends`);
+    }
+
     const friendsData = [];
     
-    const promises = friendIds.map(async (id) => {
+    const promises = validFriendIds.map(async (id) => {
       const profile = await getCachedUserProfile(id);
       if (profile) {
         // Only override status based on socket presence
@@ -3428,26 +3440,46 @@ io.on("connection", (socket) => {
   // FRIEND SUBSCRIPTION (WebSockets instead of RTDB/Firestore polling)
   socket.on("subscribe_friends", async (friendIds) => {
     if (!Array.isArray(friendIds)) return;
+    if (!socket.userId) {
+      console.warn("🔒 [SECURITY] Unregistered socket attempted to subscribe to friends");
+      return;
+    }
     
-    // Join presence rooms so this socket receives real-time online/offline updates
-    friendIds.forEach(id => {
-      socket.join(`presence:${id}`);
-    });
-
-    const friendsData = [];
-    const promises = friendIds.map(async (id) => {
-      const profile = await getCachedUserProfile(id);
-      if (profile) {
-        const isOnline = !!userSockets[id];
-        friendsData.push({
-          ...profile,
-          status: isOnline ? (profile.currentGame ? 'in_game' : 'online') : 'offline'
-        });
+    try {
+      // Secure check: verify that the requested friendIds are actually friends of the user
+      const db = admin.firestore();
+      const userDoc = await db.collection('users').doc(socket.userId).get();
+      const userFriends = userDoc.exists ? (userDoc.data().friends || []) : [];
+      
+      // Filter out any IDs that are not in the user's friend list
+      const validFriendIds = friendIds.filter(id => userFriends.includes(id));
+      
+      if (validFriendIds.length === 0 && friendIds.length > 0) {
+        console.warn(`🔒 [SECURITY] User ${socket.userId} attempted to subscribe to non-friends`);
       }
-    });
-    
-    await Promise.all(promises);
-    socket.emit("friends_update", friendsData);
+
+      // Join presence rooms so this socket receives real-time online/offline updates
+      validFriendIds.forEach(id => {
+        socket.join(`presence:${id}`);
+      });
+
+      const friendsData = [];
+      const promises = validFriendIds.map(async (id) => {
+        const profile = await getCachedUserProfile(id);
+        if (profile) {
+          const isOnline = !!userSockets[id];
+          friendsData.push({
+            ...profile,
+            status: isOnline ? (profile.currentGame ? 'in_game' : 'online') : 'offline'
+          });
+        }
+      });
+      
+      await Promise.all(promises);
+      socket.emit("friends_update", friendsData);
+    } catch (error) {
+      console.error("[SERVER-FRIENDS] Error in subscribe_friends:", error);
+    }
   });
 
   // UN-SUBSCRIBE FRIENDS
