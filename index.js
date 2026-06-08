@@ -131,10 +131,14 @@ app.post('/api/user/create-profile', strictLimiter, authenticateFinancialRequest
     const db = admin.firestore();
     const userRef = db.collection('users').doc(userId);
     
+    let existed = false;
+    
     await db.runTransaction(async (transaction) => {
       const userDoc = await transaction.get(userRef);
-      if (userDoc.exists) {
-        throw new Error('Profile already exists');
+      // Check if a fully formed profile already exists (e.g., has coins)
+      if (userDoc.exists && userDoc.data().coins !== undefined) {
+        existed = true;
+        return;
       }
       
       const newProfile = {
@@ -169,8 +173,13 @@ app.post('/api/user/create-profile', strictLimiter, authenticateFinancialRequest
         },
       };
       
-      transaction.set(userRef, newProfile);
+      // Use merge: true to preserve fields like lastActive set by client listener
+      transaction.set(userRef, newProfile, { merge: true });
     });
+    
+    if (existed) {
+      return res.status(200).json({ success: true, message: 'Profile already existed, skipped creation' });
+    }
     
     res.status(200).json({ success: true, message: 'Profile created securely' });
   } catch (error) {
