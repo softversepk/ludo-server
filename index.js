@@ -743,18 +743,97 @@ app.post('/api/club/create', strictLimiter, authenticateFinancialRequest, async 
   }
 });
 
+// Search clubs securely
+app.get('/api/club/search', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { searchTerm } = req.query;
+    const db = admin.firestore();
+    
+    let clubsQuery;
+    
+    if (!searchTerm) {
+      // Return top public clubs
+      clubsQuery = db.collection('clubs')
+        .where('isPrivate', '==', false)
+        .orderBy('totalPoints', 'desc')
+        .limit(100);
+    } else {
+      // Search by name
+      clubsQuery = db.collection('clubs')
+        .where('isPrivate', '==', false)
+        .where('name', '>=', searchTerm)
+        .where('name', '<=', searchTerm + '\uf8ff')
+        .limit(100);
+    }
+
+    try {
+      const snapshot = await clubsQuery.get();
+      const clubs = [];
+      snapshot.forEach(doc => {
+        const data = doc.data();
+        // NEVER send inviteCode for search results to prevent hacking private/invite-only bypasses
+        delete data.inviteCode;
+        clubs.push({ id: doc.id, ...data });
+      });
+      
+      // If we couldn't use orderBy because of index, sort here
+      if (!searchTerm) {
+        clubs.sort((a, b) => (b.totalPoints || 0) - (a.totalPoints || 0));
+      }
+      
+      res.status(200).json({ success: true, clubs });
+    } catch (indexError) {
+      // Fallback if index is missing
+      const fallbackQuery = db.collection('clubs').where('isPrivate', '==', false).limit(100);
+      const snapshot = await fallbackQuery.get();
+      const clubs = [];
+      snapshot.forEach(doc => {
+        const data = doc.data();
+        delete data.inviteCode; // Secure the invite code
+        clubs.push({ id: doc.id, ...data });
+      });
+      
+      if (!searchTerm) {
+        clubs.sort((a, b) => (b.totalPoints || 0) - (a.totalPoints || 0));
+      } else {
+        const lowerSearch = searchTerm.toLowerCase();
+        const filteredClubs = clubs.filter(c => c.name && c.name.toLowerCase().includes(lowerSearch));
+        return res.status(200).json({ success: true, clubs: filteredClubs });
+      }
+      
+      res.status(200).json({ success: true, clubs });
+    }
+  } catch (error) {
+    console.error('Error searching clubs:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
 app.post('/api/club/join', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { clubId, inviteCode } = req.body;
     const userId = req.userId;
 
-    if (!clubId) {
-      return res.status(400).json({ error: 'Club ID required' });
+    if (!clubId && !inviteCode) {
+      return res.status(400).json({ error: 'Club ID or Invite Code required' });
     }
 
     const db = admin.firestore();
     const userRef = db.collection('users').doc(userId);
-    const clubRef = db.collection('clubs').doc(clubId);
+    
+    // We will determine the clubRef inside the transaction if we only have inviteCode,
+    // but Firestore transactions require reads before writes.
+    // So let's look up the club by invite code first if clubId is not provided.
+    let targetClubId = clubId;
+    if (!targetClubId && inviteCode) {
+      const clubsSnapshot = await db.collection('clubs').where('inviteCode', '==', inviteCode.toUpperCase()).limit(1).get();
+      if (clubsSnapshot.empty) {
+        return res.status(400).json({ error: 'Invalid invite code' });
+      }
+      targetClubId = clubsSnapshot.docs[0].id;
+    }
+
+    const clubRef = db.collection('clubs').doc(targetClubId);
 
     await db.runTransaction(async (transaction) => {
       const userDoc = await transaction.get(userRef);
@@ -793,7 +872,7 @@ app.post('/api/club/join', strictLimiter, authenticateFinancialRequest, async (r
       });
 
       transaction.update(userRef, {
-        clubId: clubId,
+        clubId: targetClubId,
         clubRole: 'member'
       });
     });
