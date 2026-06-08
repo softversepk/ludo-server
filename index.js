@@ -119,6 +119,66 @@ const profileLimiter = rateLimit({
 const CLUB_LEAGUES = require('./utils/clubLeagues');
 
 // USER PROFILE SECURE ENDPOINTS
+app.post('/api/user/create-profile', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const { email, username } = req.body;
+    
+    if (!username || !email) {
+      return res.status(400).json({ error: 'Username and email required' });
+    }
+    
+    const db = admin.firestore();
+    const userRef = db.collection('users').doc(userId);
+    
+    await db.runTransaction(async (transaction) => {
+      const userDoc = await transaction.get(userRef);
+      if (userDoc.exists) {
+        throw new Error('Profile already exists');
+      }
+      
+      const newProfile = {
+        uid: userId,
+        email: email,
+        username: username,
+        avatar: "default",
+        coins: 1000000,
+        gems: 1000000,
+        gamesPlayed: 0,
+        gamesWon: 0,
+        tokensKilled: 0,
+        clubId: null,
+        clubRole: null,
+        clubPoints: 0,
+        totalClubPoints: 0,
+        weeklyCoins: 0,
+        weeklyProfitCoins: 0,
+        loginStreak: 0,
+        lastLoginDate: null,
+        winStreak: 0,
+        totalCoinsEarned: 1000000,
+        claimedAchievements: [],
+        createdAt: new Date().toISOString(),
+        lastLogin: new Date().toISOString(),
+        deviceId: 'server_' + Date.now(),
+        settings: {
+          theme: "classic",
+          tokenSkin: "classic",
+          soundEnabled: true,
+          vibrationEnabled: true,
+        },
+      };
+      
+      transaction.set(userRef, newProfile);
+    });
+    
+    res.status(200).json({ success: true, message: 'Profile created securely' });
+  } catch (error) {
+    console.error('Error creating profile:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
 app.post('/api/user/update-profile', profileLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const userId = req.userId;
