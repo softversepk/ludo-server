@@ -750,6 +750,7 @@ app.get('/api/club/search', strictLimiter, authenticateFinancialRequest, async (
     const db = admin.firestore();
     
     let clubsQuery;
+    let codeClubs = [];
     
     if (!searchTerm) {
       // Return top public clubs
@@ -764,16 +765,36 @@ app.get('/api/club/search', strictLimiter, authenticateFinancialRequest, async (
         .where('name', '>=', searchTerm)
         .where('name', '<=', searchTerm + '\uf8ff')
         .limit(100);
+
+      // Search by invite code (Highly secure: doesn't return the code itself)
+      try {
+        const codeQuery = db.collection('clubs')
+          .where('inviteCode', '==', searchTerm.toUpperCase())
+          .limit(1);
+        const codeSnap = await codeQuery.get();
+        codeSnap.forEach(doc => {
+          const data = doc.data();
+          delete data.inviteCode;
+          codeClubs.push({ id: doc.id, ...data });
+        });
+      } catch (err) {
+        console.error('Error searching by invite code:', err.message);
+      }
     }
 
     try {
       const snapshot = await clubsQuery.get();
-      const clubs = [];
+      const clubs = [...codeClubs];
+      const addedIds = new Set(clubs.map(c => c.id));
+
       snapshot.forEach(doc => {
-        const data = doc.data();
-        // NEVER send inviteCode for search results to prevent hacking private/invite-only bypasses
-        delete data.inviteCode;
-        clubs.push({ id: doc.id, ...data });
+        if (!addedIds.has(doc.id)) {
+          const data = doc.data();
+          // NEVER send inviteCode for search results to prevent hacking private/invite-only bypasses
+          delete data.inviteCode;
+          clubs.push({ id: doc.id, ...data });
+          addedIds.add(doc.id);
+        }
       });
       
       // If we couldn't use orderBy because of index, sort here
@@ -786,18 +807,27 @@ app.get('/api/club/search', strictLimiter, authenticateFinancialRequest, async (
       // Fallback if index is missing
       const fallbackQuery = db.collection('clubs').where('isPrivate', '==', false).limit(100);
       const snapshot = await fallbackQuery.get();
-      const clubs = [];
+      const clubs = [...codeClubs];
+      const addedIds = new Set(clubs.map(c => c.id));
+
       snapshot.forEach(doc => {
-        const data = doc.data();
-        delete data.inviteCode; // Secure the invite code
-        clubs.push({ id: doc.id, ...data });
+        if (!addedIds.has(doc.id)) {
+          const data = doc.data();
+          delete data.inviteCode; // Secure the invite code
+          clubs.push({ id: doc.id, ...data });
+          addedIds.add(doc.id);
+        }
       });
       
       if (!searchTerm) {
         clubs.sort((a, b) => (b.totalPoints || 0) - (a.totalPoints || 0));
       } else {
         const lowerSearch = searchTerm.toLowerCase();
-        const filteredClubs = clubs.filter(c => c.name && c.name.toLowerCase().includes(lowerSearch));
+        const codeClubIds = new Set(codeClubs.map(c => c.id));
+        const filteredClubs = clubs.filter(c => 
+          (c.name && c.name.toLowerCase().includes(lowerSearch)) || 
+          codeClubIds.has(c.id) // This securely keeps the invite code matched clubs
+        );
         return res.status(200).json({ success: true, clubs: filteredClubs });
       }
       
