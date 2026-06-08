@@ -826,11 +826,26 @@ app.post('/api/club/join', strictLimiter, authenticateFinancialRequest, async (r
     // So let's look up the club by invite code first if clubId is not provided.
     let targetClubId = clubId;
     if (!targetClubId && inviteCode) {
-      const clubsSnapshot = await db.collection('clubs').where('inviteCode', '==', inviteCode.toUpperCase()).limit(1).get();
+      // First try exact match
+      let clubsSnapshot = await db.collection('clubs').where('inviteCode', '==', inviteCode.toUpperCase()).limit(1).get();
+      
+      // If not found, try case-insensitive match by fetching all and filtering (only if exact match fails, as it's less efficient)
       if (clubsSnapshot.empty) {
-        return res.status(400).json({ error: 'Invalid invite code' });
+        // Just in case it was saved in lowercase or mixed case in DB
+        const allClubsSnap = await db.collection('clubs').where('isPrivate', '==', true).get();
+        const matchedDoc = allClubsSnap.docs.find(doc => {
+          const code = doc.data().inviteCode;
+          return code && code.toUpperCase() === inviteCode.toUpperCase();
+        });
+        
+        if (matchedDoc) {
+          targetClubId = matchedDoc.id;
+        } else {
+          return res.status(400).json({ error: 'Invalid invite code' });
+        }
+      } else {
+        targetClubId = clubsSnapshot.docs[0].id;
       }
-      targetClubId = clubsSnapshot.docs[0].id;
     }
 
     const clubRef = db.collection('clubs').doc(targetClubId);
@@ -862,7 +877,9 @@ app.post('/api/club/join', strictLimiter, authenticateFinancialRequest, async (r
 
       // Check if private and verify invite code
       if (clubData.isPrivate) {
-        if (!inviteCode || inviteCode.toUpperCase() !== clubData.inviteCode) {
+        // If they provided a code, verify it. (If they are joining via search results or regular join without code, 
+        // they shouldn't be able to join a private club anyway unless invited. For now, strict check:)
+        if (!inviteCode || (clubData.inviteCode && inviteCode.toUpperCase() !== clubData.inviteCode.toUpperCase())) {
           throw new Error('Invalid invite code for private club');
         }
       }
