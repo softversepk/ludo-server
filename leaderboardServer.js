@@ -2,6 +2,7 @@
  * Leaderboard Server with Socket.IO
  * Real-time ranking updates for players and clubs
  */
+const admin = require('firebase-admin');
 
 class LeaderboardServer {
   constructor(io) {
@@ -10,6 +11,56 @@ class LeaderboardServer {
     this.clubLeaderboard = new Map(); // clubId -> { rank, points, members, etc }
     this.subscribedUsers = new Map(); // socketId -> { userId, subscriptions }
     this.updateInterval = null;
+    this.fetchInterval = null;
+    this.isFetching = false;
+  }
+
+  /**
+   * Fetch leaderboard from Firebase to keep in-memory cache updated
+   * This ensures Firebase quota is not exceeded (only server reads it periodically)
+   */
+  async fetchFromFirebase() {
+    if (this.isFetching) return;
+    this.isFetching = true;
+    try {
+      if (!admin.apps.length) {
+        console.warn('⚠️ [LEADERBOARD] Firebase Admin not initialized, cannot fetch leaderboard');
+        this.isFetching = false;
+        return;
+      }
+      
+      const db = admin.firestore();
+      
+      // Fetch top 100 players by weeklyProfitCoins
+      const playersSnapshot = await db.collection('users')
+        .orderBy('weeklyProfitCoins', 'desc')
+        .limit(100)
+        .get();
+        
+      const newPlayers = new Map();
+      playersSnapshot.docs.forEach((doc, index) => {
+        const data = doc.data();
+        newPlayers.set(doc.id, {
+          userId: doc.id,
+          username: data.username || 'Unknown',
+          avatar: data.avatar || '',
+          score: data.weeklyProfitCoins || 0,
+          wins: data.gamesWon || 0,
+          gamesPlayed: data.gamesPlayed || 0,
+          clubId: data.clubId || null,
+          rank: index + 1,
+          lastUpdated: Date.now()
+        });
+      });
+      
+      this.playerLeaderboard = newPlayers;
+      console.log(`✅ [LEADERBOARD SECURE] Fetched ${this.playerLeaderboard.size} players from Firebase`);
+      
+    } catch (error) {
+      console.error('❌ [LEADERBOARD SECURE] Error fetching from Firebase:', error);
+    } finally {
+      this.isFetching = false;
+    }
   }
 
   /**
@@ -38,7 +89,10 @@ class LeaderboardServer {
       socket.on('disconnect', () => this.handleDisconnect(socket));
     });
 
-    // Start periodic leaderboard recalculation
+    // Initial fetch from Firebase
+    this.fetchFromFirebase();
+
+    // Start periodic leaderboard recalculation and fetching
     this.startLeaderboardUpdates();
   }
 
@@ -415,6 +469,11 @@ class LeaderboardServer {
    * Start periodic leaderboard updates
    */
   startLeaderboardUpdates() {
+    // Fetch from Firebase every 5 minutes to keep things in sync (saves quota)
+    this.fetchInterval = setInterval(() => {
+      this.fetchFromFirebase();
+    }, 5 * 60 * 1000);
+
     // Broadcast full leaderboard every 30 seconds
     this.updateInterval = setInterval(() => {
       // Broadcast to players room
@@ -444,6 +503,10 @@ class LeaderboardServer {
     if (this.updateInterval) {
       clearInterval(this.updateInterval);
       this.updateInterval = null;
+    }
+    if (this.fetchInterval) {
+      clearInterval(this.fetchInterval);
+      this.fetchInterval = null;
     }
   }
 
