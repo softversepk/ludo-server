@@ -838,19 +838,23 @@ app.post('/api/club/join', strictLimiter, authenticateFinancialRequest, async (r
           return code && code.toUpperCase() === inviteCode.toUpperCase();
         });
         
-        if (matchedDoc) {
-          targetClubId = matchedDoc.id;
-        } else {
+        if (!matchedDoc) {
           return res.status(400).json({ error: 'Invalid invite code' });
         }
+        targetClubId = matchedDoc.id;
       } else {
         targetClubId = clubsSnapshot.docs[0].id;
       }
     }
 
+    if (!targetClubId) {
+      return res.status(400).json({ error: 'Could not determine club ID' });
+    }
+
     const clubRef = db.collection('clubs').doc(targetClubId);
 
     await db.runTransaction(async (transaction) => {
+      // READ FIRST: Must fetch user and club docs sequentially before ANY writes
       const userDoc = await transaction.get(userRef);
       if (!userDoc.exists) throw new Error('User not found');
       
