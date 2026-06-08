@@ -899,14 +899,16 @@ app.post('/api/club/leave', strictLimiter, authenticateFinancialRequest, async (
 
       const clubRef = db.collection('clubs').doc(clubId);
       
+      // READ FIRST: It's possible the club doc was deleted, check first
+      const clubDoc = await transaction.get(clubRef);
+      
+      // THEN WRITE: Now perform all updates
       transaction.update(userRef, {
         clubId: admin.firestore.FieldValue.delete(),
         clubRole: admin.firestore.FieldValue.delete(),
         clubPoints: 0
       });
 
-      // It's possible the club doc was deleted, check first or use update without fail
-      const clubDoc = await transaction.get(clubRef);
       if (clubDoc.exists) {
         transaction.update(clubRef, {
           memberCount: admin.firestore.FieldValue.increment(-1)
