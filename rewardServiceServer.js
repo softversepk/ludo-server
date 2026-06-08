@@ -100,7 +100,7 @@ class RewardServiceServer {
               userId,
               username: finalData.username || 'Player',
               avatar: finalData.avatar || 'default',
-              score: finalData.totalCoinsEarned || finalData.totalScore || finalData.xp || finalData.coins || 0,
+              score: finalData.weeklyProfitCoins || 0,
               wins: finalData.gamesWon || 0,
               gamesPlayed: finalData.gamesPlayed || 0,
               clubId: finalData.clubId || null
@@ -165,7 +165,7 @@ class RewardServiceServer {
               userId,
               username: finalData.username || 'Player',
               avatar: finalData.avatar || 'default',
-              score: finalData.totalCoinsEarned || finalData.totalScore || finalData.xp || finalData.coins || 0,
+              score: finalData.weeklyProfitCoins || 0,
               wins: finalData.gamesWon || 0,
               gamesPlayed: finalData.gamesPlayed || 0,
               clubId: finalData.clubId || null
@@ -226,7 +226,7 @@ class RewardServiceServer {
               userId,
               username: finalData.username || 'Player',
               avatar: finalData.avatar || 'default',
-              score: finalData.totalCoinsEarned || finalData.totalScore || finalData.xp || finalData.coins || 0,
+              score: finalData.weeklyProfitCoins || 0,
               wins: finalData.gamesWon || 0,
               gamesPlayed: finalData.gamesPlayed || 0,
               clubId: finalData.clubId || null
