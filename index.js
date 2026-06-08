@@ -3243,6 +3243,10 @@ const userRooms = {};
 const userProfileCache = new Map();
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
+// In-memory store for active game and club invites (to avoid RTDB quota)
+const activeGameInvites = new Map();
+
+
 // Helper to get cached or fresh user profile
 const getCachedUserProfile = async (userId) => {
   const cached = userProfileCache.get(userId);
@@ -3488,6 +3492,241 @@ io.on("connection", (socket) => {
     friendIds.forEach(id => {
       socket.leave(`presence:${id}`);
     });
+  });
+
+  // ==========================================
+  // WEBSOCKET GAME INVITE SYSTEM (Replaces RTDB)
+  // ==========================================
+
+  socket.on("send_game_invite", async (data, callback) => {
+    const { toUserId, gameData, roomCode } = data;
+    const fromUserId = socket.userId;
+
+    if (!fromUserId) return callback && callback({ success: false, error: 'Not authenticated' });
+    if (!toUserId || !gameData || !roomCode) return callback && callback({ success: false, error: 'Invalid invite data' });
+    if (toUserId === fromUserId) return callback && callback({ success: false, error: 'Cannot send invite to yourself' });
+
+    try {
+      const inviteId = "inv_" + Date.now() + "_" + Math.random().toString(36).substr(2, 5);
+      
+      const inviteDataToSave = {
+        id: inviteId,
+        fromUserId: fromUserId,
+        fromUsername: gameData.fromUsername || 'Player',
+        fromAvatar: gameData.fromAvatar || 'default',
+        toUserId: toUserId,
+        gameType: String(gameData.gameType || 'unknown'),
+        gameName: String(gameData.gameName || 'Game'),
+        betAmount: Number(gameData.betAmount || 0),
+        roomCode: String(roomCode),
+        gameMode: String(gameData.gameMode || 'classic'),
+        status: 'pending',
+        timestamp: Date.now(),
+        expiresAt: Date.now() + 60000
+      };
+
+      activeGameInvites.set(inviteId, inviteDataToSave);
+
+      // Notify receiver if online
+      const receiverSocketId = userSockets[toUserId];
+      if (receiverSocketId) {
+        io.to(receiverSocketId).emit("game_invite_received", inviteDataToSave);
+      }
+
+      // Auto-expire after 60s
+      setTimeout(() => {
+        if (activeGameInvites.has(inviteId)) {
+          activeGameInvites.delete(inviteId);
+        }
+      }, 60000);
+
+      if (callback) callback({ success: true, inviteId, roomCode });
+    } catch (error) {
+      console.error('Error sending game invite:', error);
+      if (callback) callback({ success: false, error: error.message });
+    }
+  });
+
+  socket.on("cancel_game_invite", async (data, callback) => {
+    const { inviteId } = data;
+    const fromUserId = socket.userId;
+
+    if (!fromUserId) return callback && callback({ success: false, error: 'Not authenticated' });
+    
+    const invite = activeGameInvites.get(inviteId);
+    if (invite && invite.fromUserId === fromUserId) {
+      // Refund the bet amount
+      if (invite.betAmount > 0) {
+        await secureRefundCoins(fromUserId, invite.betAmount);
+      }
+      activeGameInvites.delete(inviteId);
+      
+      // Notify receiver
+      const receiverSocketId = userSockets[invite.toUserId];
+      if (receiverSocketId) {
+        io.to(receiverSocketId).emit("game_invite_cancelled", { inviteId });
+      }
+      
+      if (callback) callback({ success: true });
+    } else {
+      if (callback) callback({ success: false, error: 'Invite not found or unauthorized' });
+    }
+  });
+
+  socket.on("accept_game_invite", async (data, callback) => {
+    const { inviteId } = data;
+    const userId = socket.userId;
+
+    if (!userId) return callback && callback({ success: false, error: 'Not authenticated' });
+
+    const invite = activeGameInvites.get(inviteId);
+    if (!invite || invite.toUserId !== userId) {
+      return callback && callback({ success: false, error: 'Invite expired or invalid' });
+    }
+
+    // Deduct coins for receiver
+    if (invite.betAmount > 0) {
+      const deductionSuccess = await secureDeductCoins(userId, invite.betAmount);
+      if (!deductionSuccess) {
+        return callback && callback({ success: false, error: 'Insufficient coins' });
+      }
+    }
+
+    activeGameInvites.delete(inviteId);
+
+    // Notify sender
+    const senderSocketId = userSockets[invite.fromUserId];
+    if (senderSocketId) {
+      io.to(senderSocketId).emit("game_invite_accepted", { inviteId, roomCode: invite.roomCode });
+    }
+
+    if (callback) callback({ 
+      success: true, 
+      roomCode: invite.roomCode,
+      gameType: invite.gameType,
+      betAmount: invite.betAmount,
+      gameMode: invite.gameMode,
+      clubId: invite.clubId || null
+    });
+  });
+
+  socket.on("reject_game_invite", async (data, callback) => {
+    const { inviteId } = data;
+    const userId = socket.userId;
+
+    if (!userId) return callback && callback({ success: false, error: 'Not authenticated' });
+
+    const invite = activeGameInvites.get(inviteId);
+    if (invite && invite.toUserId === userId) {
+      // Refund sender
+      if (invite.betAmount > 0) {
+        await secureRefundCoins(invite.fromUserId, invite.betAmount);
+      }
+      activeGameInvites.delete(inviteId);
+
+      // Notify sender
+      const senderSocketId = userSockets[invite.fromUserId];
+      if (senderSocketId) {
+        io.to(senderSocketId).emit("game_invite_rejected", { inviteId });
+      }
+    }
+    
+    if (callback) callback({ success: true });
+  });
+
+  socket.on("send_club_game_invite", async (data, callback) => {
+    const { clubId, gameData, roomCode } = data;
+    let { clubMembers } = data;
+    const fromUserId = socket.userId;
+
+    if (!fromUserId) return callback && callback({ success: false, error: 'Not authenticated' });
+
+    try {
+      if (!clubMembers || clubMembers.length === 0) {
+        const db = admin.firestore();
+        const membersSnapshot = await db.collection('users').where('clubId', '==', clubId).get();
+        clubMembers = [];
+        membersSnapshot.forEach(doc => {
+          if (doc.id !== fromUserId) clubMembers.push(doc.id);
+        });
+      }
+      
+      let totalInvited = 0;
+
+      clubMembers.forEach(memberId => {
+        if (memberId === fromUserId) return;
+        
+        const inviteId = "inv_club_" + Date.now() + "_" + Math.random().toString(36).substr(2, 5);
+        
+        const inviteDataToSave = {
+          id: inviteId,
+          fromUserId: fromUserId,
+          fromUsername: gameData.fromUsername || 'Player',
+          fromAvatar: gameData.fromAvatar || 'default',
+          toUserId: memberId,
+          gameType: String(gameData.gameType || 'unknown'),
+          gameName: String(gameData.gameName || 'Game'),
+          betAmount: Number(gameData.betAmount || 0),
+          roomCode: String(roomCode),
+          clubId: clubId,
+          gameMode: String(gameData.gameMode || 'classic'),
+          isClubInvite: true,
+          status: 'pending',
+          timestamp: Date.now(),
+          expiresAt: Date.now() + 60000
+        };
+
+        activeGameInvites.set(inviteId, inviteDataToSave);
+        totalInvited++;
+
+        // Notify receiver if online
+        const receiverSocketId = userSockets[memberId];
+        if (receiverSocketId) {
+          io.to(receiverSocketId).emit("game_invite_received", inviteDataToSave);
+        }
+
+        // Auto expire
+        setTimeout(() => {
+          activeGameInvites.delete(inviteId);
+        }, 60000);
+      });
+
+      if (callback) callback({ 
+        success: true, 
+        roomCode: roomCode,
+        totalMembers: totalInvited + 1,
+        invitedMembers: totalInvited
+      });
+    } catch (error) {
+      console.error('Error sending club game invite:', error);
+      if (callback) callback({ success: false, error: error.message });
+    }
+  });
+
+  socket.on("cancel_club_invite", async (data, callback) => {
+    const { clubId, roomCode } = data;
+    const fromUserId = socket.userId;
+
+    if (!fromUserId) return callback && callback({ success: false, error: 'Not authenticated' });
+
+    // Find all active invites for this room from this user
+    for (const [inviteId, invite] of activeGameInvites.entries()) {
+      if (invite.fromUserId === fromUserId && invite.roomCode === roomCode && invite.isClubInvite) {
+        activeGameInvites.delete(inviteId);
+        const receiverSocketId = userSockets[invite.toUserId];
+        if (receiverSocketId) {
+          io.to(receiverSocketId).emit("game_invite_cancelled", { inviteId });
+        }
+      }
+    }
+    
+    // Refund the host's bet once for the whole club room
+    const room = rooms[roomCode];
+    if (room && room.host === fromUserId && room.betAmount > 0) {
+      await secureRefundCoins(fromUserId, room.betAmount);
+    }
+
+    if (callback) callback({ success: true });
   });
 
   // CREATE ROOM
