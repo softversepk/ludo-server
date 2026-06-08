@@ -60,9 +60,36 @@ class LudoGameServer {
   /**
    * Join a Ludo game room
    */
-  handleJoinGame(socket, { roomId, playerId, playerData }) {
+  async handleJoinGame(socket, { roomId, playerId, playerData, token }) {
     try {
       console.log(`🎮 [JOIN] Player ${playerId} joining room ${roomId}`);
+
+      // SECURITY: Token-based Authentication
+      if (!token) {
+        console.warn(`[Ludo] Security Alert: Join attempt without token by ${playerId}`);
+        socket.emit('ludo:join_error', { error: 'Authentication token required' });
+        return;
+      }
+
+      if (this.admin) {
+        try {
+          const decodedToken = await this.admin.auth().verifyIdToken(token);
+          if (decodedToken.uid !== playerId) {
+            console.warn(`[Ludo] Security Alert: UID mismatch. Token UID: ${decodedToken.uid}, Requested: ${playerId}`);
+            socket.emit('ludo:join_error', { error: 'Unauthorized user ID mismatch' });
+            return;
+          }
+          // Mark socket as securely authenticated
+          socket.userId = playerId;
+        } catch (authError) {
+          console.error('[Ludo] Security Alert: Token verification failed:', authError.message);
+          socket.emit('ludo:join_error', { error: 'Invalid or expired authentication token' });
+          return;
+        }
+      } else {
+        // Fallback if admin not initialized (e.g., local dev without Firebase)
+        socket.userId = playerId;
+      }
 
       // Get or create room
       let room = this.rooms.get(roomId);
@@ -146,6 +173,12 @@ class LudoGameServer {
     try {
       console.log(`👋 [LEAVE] Player ${playerId} leaving room ${roomId}`);
 
+      // SECURITY: Validate authenticated socket
+      if (socket.userId && socket.userId !== playerId) {
+        console.warn(`[Ludo] Security Alert: Socket ${socket.id} (User: ${socket.userId}) attempted to leave game for player ${playerId}`);
+        return;
+      }
+
       const room = this.rooms.get(roomId);
       if (!room) return;
 
@@ -201,6 +234,12 @@ class LudoGameServer {
    */
   handlePlayerReady(socket, { roomId, playerId, ready }) {
     try {
+      // SECURITY: Validate authenticated socket
+      if (socket.userId && socket.userId !== playerId) {
+        console.warn(`[Ludo] Security Alert: Socket ${socket.id} (User: ${socket.userId}) attempted to set ready for player ${playerId}`);
+        return;
+      }
+
       const room = this.rooms.get(roomId);
       if (!room || !room.players[playerId]) return;
 
@@ -229,6 +268,12 @@ class LudoGameServer {
   handleStartGame(socket, { roomId, playerId }) {
     try {
       console.log(`🎬 [START] Starting game in room ${roomId}`);
+
+      // SECURITY: Validate authenticated socket
+      if (socket.userId && socket.userId !== playerId) {
+        console.warn(`[Ludo] Security Alert: Socket ${socket.id} (User: ${socket.userId}) attempted to start game for player ${playerId}`);
+        return;
+      }
 
       const room = this.rooms.get(roomId);
       if (!room) return;
@@ -427,9 +472,15 @@ class LudoGameServer {
       const player = room.players[playerId];
       if (!player) return;
 
-      // SECURITY: Validate that the socket making the request belongs to the player
+      // SECURITY: Validate authenticated socket
+      if (socket.userId && socket.userId !== playerId) {
+        console.warn(`[Ludo] Security Alert: Socket ${socket.id} (User: ${socket.userId}) attempted to roll dice for player ${playerId}`);
+        return;
+      }
+
+      // SECURITY: Validate that the socket making the request belongs to the player (fallback)
       const expectedSocketId = player.socketId;
-      if (expectedSocketId && socket.id !== expectedSocketId) {
+      if (!socket.userId && expectedSocketId && socket.id !== expectedSocketId) {
         console.warn(`[Ludo] Security Alert: Socket ${socket.id} attempted to roll dice for player ${playerId} but expected socket ${expectedSocketId}`);
         return;
       }
@@ -507,9 +558,15 @@ class LudoGameServer {
       const player = room.players[playerId];
       if (!player) return;
 
-      // SECURITY: Validate that the socket making the request belongs to the player
+      // SECURITY: Validate authenticated socket
+      if (socket.userId && socket.userId !== playerId) {
+        console.warn(`[Ludo] Security Alert: Socket ${socket.id} (User: ${socket.userId}) attempted to undo roll for player ${playerId}`);
+        return;
+      }
+
+      // SECURITY: Validate that the socket making the request belongs to the player (fallback)
       const expectedSocketId = player.socketId;
-      if (expectedSocketId && socket.id !== expectedSocketId) {
+      if (!socket.userId && expectedSocketId && socket.id !== expectedSocketId) {
         console.warn(`[Ludo] Security Alert: Socket ${socket.id} attempted to undo roll for player ${playerId} but expected socket ${expectedSocketId}`);
         return;
       }
@@ -526,8 +583,12 @@ class LudoGameServer {
         return;
       }
 
+      // SECURITY: Prevent race conditions by locking state during async transaction
+      room.gameState.status = 'undoing';
+
       // Deduct diamonds using Firebase Admin
       if (!this.admin || !this.admin.apps.length) {
+        room.gameState.status = GAME_STATE.MOVING;
         socket.emit('ludo:action_error', { error: 'Server configuration error' });
         return;
       }
@@ -535,21 +596,26 @@ class LudoGameServer {
       const db = this.admin.firestore();
       const userRef = db.collection('users').doc(playerId);
       
-      await db.runTransaction(async (transaction) => {
-        const userDoc = await transaction.get(userRef);
-        if (!userDoc.exists) throw new Error('User not found');
-        
-        const userData = userDoc.data();
-        const currentGems = userData.gems || 0;
-        
-        if (currentGems < 5) {
-          throw new Error('Not enough diamonds');
-        }
-        
-        transaction.update(userRef, {
-          gems: currentGems - 5
+      try {
+        await db.runTransaction(async (transaction) => {
+          const userDoc = await transaction.get(userRef);
+          if (!userDoc.exists) throw new Error('User not found');
+          
+          const userData = userDoc.data();
+          const currentGems = userData.gems || 0;
+          
+          if (currentGems < 5) {
+            throw new Error('Not enough diamonds');
+          }
+          
+          transaction.update(userRef, {
+            gems: currentGems - 5
+          });
         });
-      });
+      } catch (txError) {
+        room.gameState.status = GAME_STATE.MOVING;
+        throw txError;
+      }
 
       // Generate new dice roll
       const diceValue = Math.floor(Math.random() * 6) + 1;
@@ -611,9 +677,15 @@ class LudoGameServer {
       const player = room.players[playerId];
       if (!player) return;
 
-      // SECURITY: Validate that the socket making the request belongs to the player
+      // SECURITY: Validate authenticated socket
+      if (socket.userId && socket.userId !== playerId) {
+        console.warn(`[Ludo] Security Alert: Socket ${socket.id} (User: ${socket.userId}) attempted to move token for player ${playerId}`);
+        return;
+      }
+
+      // SECURITY: Validate that the socket making the request belongs to the player (fallback)
       const expectedSocketId = player.socketId;
-      if (expectedSocketId && socket.id !== expectedSocketId) {
+      if (!socket.userId && expectedSocketId && socket.id !== expectedSocketId) {
         console.warn(`[Ludo] Security Alert: Socket ${socket.id} attempted to move token for player ${playerId} but expected socket ${expectedSocketId}`);
         return;
       }
@@ -683,9 +755,15 @@ class LudoGameServer {
       const player = room.players[playerId];
       if (!player || player.color !== room.gameState.currentPlayer) return;
 
-      // SECURITY: Validate that the socket making the request belongs to the player
+      // SECURITY: Validate authenticated socket
+      if (socket.userId && socket.userId !== playerId) {
+        console.warn(`[Ludo] Security Alert: Socket ${socket.id} (User: ${socket.userId}) attempted to skip turn for player ${playerId}`);
+        return;
+      }
+
+      // SECURITY: Validate that the socket making the request belongs to the player (fallback)
       const expectedSocketId = player.socketId;
-      if (expectedSocketId && socket.id !== expectedSocketId) {
+      if (!socket.userId && expectedSocketId && socket.id !== expectedSocketId) {
         console.warn(`[Ludo] Security Alert: Socket ${socket.id} attempted to skip turn for player ${playerId} but expected socket ${expectedSocketId}`);
         return;
       }
@@ -1104,7 +1182,7 @@ class LudoGameServer {
   /**
    * Handle a player finishing all tokens
    */
-  async handlePlayerWin(room, playerColor) {
+  handlePlayerWin(room, playerColor) {
     const gameMode = room.gameMode || room.mode || 'classic';
     const totalPlayers = room.maxPlayers || Object.keys(room.players).length || room.gameState.turnOrder.length;
     
@@ -1115,31 +1193,24 @@ class LudoGameServer {
     if (!room.gameState.winners.includes(playerColor)) {
       room.gameState.winners.push(playerColor);
       
-      // --- IMMEDIATE REWARD PROCESSING FOR WINNER ---
-      try {
-        const betAmount = room.betAmount || 100;
-        const position = room.gameState.winners.length;
-        const playerInfo = Object.values(room.players).find(p => p.color === playerColor);
-        
-        if (playerInfo && !playerInfo.isBot && playerInfo.id) {
-          if (room.isTeamMode) {
-            // Team mode rewards can be handled at game over when team result is final
-          } else {
-            // Normal mode (Classic, Arrow, Quick Arrow)
-            const result = await RewardServiceServer.awardGameWin(playerInfo.id, 'LUDO', betAmount, position, totalPlayers);
+      // --- IMMEDIATE REWARD PROCESSING FOR WINNER (Fire and Forget to avoid blocking state) ---
+      const betAmount = room.betAmount || 100;
+      const position = room.gameState.winners.length;
+      const playerInfo = Object.values(room.players).find(p => p.color === playerColor);
+      
+      if (playerInfo && !playerInfo.isBot && playerInfo.id && !room.isTeamMode) {
+        RewardServiceServer.awardGameWin(playerInfo.id, 'LUDO', betAmount, position, totalPlayers)
+          .then(result => {
             if (result.success) {
               this.io.to(room.id).emit(`reward:awarded:${playerInfo.id}`, result);
-              // Also notify the player directly with their reward details so UI can update
               this.io.to(playerInfo.socketId).emit('ludo:reward_received', {
                 position,
                 reward: result.coins !== undefined ? result.coins : 0,
                 coins: result.coins !== undefined ? result.coins : 0
               });
             }
-          }
-        }
-      } catch (error) {
-        console.error('Error processing immediate reward in Ludo:', error);
+          })
+          .catch(error => console.error('Error processing immediate reward in Ludo:', error));
       }
       // ----------------------------------------------
     }
