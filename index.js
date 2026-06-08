@@ -856,25 +856,18 @@ app.post('/api/club/join', strictLimiter, authenticateFinancialRequest, async (r
     // So let's look up the club by invite code first if clubId is not provided.
     let targetClubId = clubId;
     if (!targetClubId && inviteCode) {
-      // First try exact match
-      let clubsSnapshot = await db.collection('clubs').where('inviteCode', '==', inviteCode.toUpperCase()).limit(1).get();
+      // Secure exact match only to prevent memory exhaustion / DoS attacks
+      const cleanInviteCode = inviteCode.trim().toUpperCase();
+      let clubsSnapshot = await db.collection('clubs')
+        .where('inviteCode', '==', cleanInviteCode)
+        .limit(1)
+        .get();
       
-      // If not found, try case-insensitive match by fetching all and filtering (only if exact match fails, as it's less efficient)
       if (clubsSnapshot.empty) {
-        // Just in case it was saved in lowercase or mixed case in DB
-        const allClubsSnap = await db.collection('clubs').where('isPrivate', '==', true).get();
-        const matchedDoc = allClubsSnap.docs.find(doc => {
-          const code = doc.data().inviteCode;
-          return code && code.toUpperCase() === inviteCode.toUpperCase();
-        });
-        
-        if (!matchedDoc) {
-          return res.status(400).json({ error: 'Invalid invite code' });
-        }
-        targetClubId = matchedDoc.id;
-      } else {
-        targetClubId = clubsSnapshot.docs[0].id;
+        return res.status(400).json({ error: 'Invalid invite code' });
       }
+      
+      targetClubId = clubsSnapshot.docs[0].id;
     }
 
     if (!targetClubId) {
@@ -928,7 +921,7 @@ app.post('/api/club/join', strictLimiter, authenticateFinancialRequest, async (r
       });
     });
 
-    res.status(200).json({ success: true, message: 'Joined club successfully' });
+    res.status(200).json({ success: true, message: 'Joined club successfully', clubId: targetClubId });
   } catch (error) {
     console.error('Error joining club:', error.message);
     res.status(400).json({ success: false, error: error.message });
