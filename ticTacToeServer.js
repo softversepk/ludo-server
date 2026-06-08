@@ -24,6 +24,19 @@ class TicTacToeGameServer {
 
       // Handle player leaving/resigning
       socket.on('tictactoe:resign', (data) => this.handleResign(socket, data));
+      
+      // Authenticate socket using token (can be done during connection or specific event if not done globally)
+      socket.on('tictactoe:authenticate', async (data) => {
+        try {
+          if (this.admin && data.token) {
+            const decodedToken = await this.admin.auth().verifyIdToken(data.token);
+            socket.userId = decodedToken.uid;
+            console.log(`✅ [TicTacToe] Socket ${socket.id} authenticated as ${socket.userId}`);
+          }
+        } catch (error) {
+          console.error('🔒 [TicTacToe] Authentication failed:', error.message);
+        }
+      });
     });
   }
 
@@ -49,8 +62,14 @@ class TicTacToeGameServer {
       const playerId = gameState.players[playerRole];
       if (!playerId) return;
 
+      // Ensure socket is authenticated and matches playerId
+      if (socket.userId && socket.userId !== playerId) {
+        console.warn(`[TicTacToe] Security Alert: Socket ${socket.id} (User: ${socket.userId}) attempted to resign for player ${playerId}`);
+        return;
+      }
+
       const expectedSocketId = this.userSockets[playerId] || (room.players[playerId] && room.players[playerId].socketId);
-      if (!expectedSocketId || socket.id !== expectedSocketId) {
+      if (!socket.userId && (!expectedSocketId || socket.id !== expectedSocketId)) {
         console.warn(`[TicTacToe] Security Alert: Socket ${socket.id} attempted to resign for player ${playerId} (role ${playerRole}) but expected socket ${expectedSocketId}`);
         return;
       }
@@ -63,12 +82,12 @@ class TicTacToeGameServer {
 
       if (!gameState.rewardsProcessed) {
         gameState.rewardsProcessed = true;
-        this.processRewards(room, gameState);
-      }
-
-      // Trigger cleanup when a player resigns
-      if (this.rooms && typeof this.rooms.scheduleRoomDelete === 'function') {
-        this.rooms.scheduleRoomDelete(roomId, 60000);
+        // Fire and forget rewards to prevent blocking
+        this.processRewards(room, gameState).catch(e => console.error('[TicTacToe] Reward processing error in resign:', e));
+        
+        if (this.rooms && typeof this.rooms.scheduleRoomDelete === 'function') {
+          this.rooms.scheduleRoomDelete(roomId, 60000);
+        }
       }
     } catch (error) {
       console.error("[TicTacToe] Resign error:", error);
@@ -93,15 +112,27 @@ class TicTacToeGameServer {
         
         if (!role) continue;
         
-        if (winnerRole === 'draw') {
-          await RewardServiceServer.awardGameDraw(uid, 'TIC_TAC_TOE', betAmount);
-        } else if (role === winnerRole) {
-          const result = await RewardServiceServer.awardGameWin(uid, 'TIC_TAC_TOE', betAmount);
-          if (result.success) {
-            this.io.to(room.id || room.roomCode).emit(`reward:awarded:${uid}`, result);
+        try {
+          if (winnerRole === 'draw') {
+            await RewardServiceServer.awardGameDraw(uid, 'TIC_TAC_TOE', betAmount);
+          } else if (winnerRole === role) {
+            const result = await RewardServiceServer.awardGameWin(uid, 'TIC_TAC_TOE', betAmount);
+            if (result && result.success) {
+              this.io.to(room.id || room.roomCode).emit(`reward:awarded:${uid}`, result);
+              const expectedSocketId = this.userSockets[uid] || (player && player.socketId);
+              if (expectedSocketId) {
+                this.io.to(expectedSocketId).emit('tictactoe:reward_received', {
+                  reward: result.coins || 0,
+                  coins: result.coins || 0,
+                  clubPoints: result.clubPoints || 0
+                });
+              }
+            }
+          } else {
+            await RewardServiceServer.awardGameLoss(uid, 'TIC_TAC_TOE', betAmount);
           }
-        } else {
-          await RewardServiceServer.awardGameLoss(uid, 'TIC_TAC_TOE', betAmount);
+        } catch (rewardError) {
+          console.error(`[TicTacToe] Error processing rewards for player ${uid}:`, rewardError);
         }
       }
     } catch (error) {
@@ -155,9 +186,15 @@ class TicTacToeGameServer {
         return;
       }
 
+      // Ensure socket is authenticated and matches playerId
+      if (socket.userId && socket.userId !== playerId) {
+        console.warn(`[TicTacToe] Security Alert: Socket ${socket.id} (User: ${socket.userId}) attempted to move for player ${playerId}`);
+        return;
+      }
+
       // Allow if the socket matches the user's registered socket, OR if the socket matches the player's stored socketId
       const expectedSocketId = this.userSockets[playerId] || (room.players[playerId] && room.players[playerId].socketId);
-      if (!expectedSocketId || socket.id !== expectedSocketId) {
+      if (!socket.userId && (!expectedSocketId || socket.id !== expectedSocketId)) {
         console.warn(`[TicTacToe] Security Alert: Socket ${socket.id} attempted to move for player ${playerId} (role ${playerRole}) but expected socket ${expectedSocketId}`);
         return;
       }
@@ -200,13 +237,15 @@ class TicTacToeGameServer {
       // Trigger cleanup and rewards when game is over
       if (room.status === 'game_over' && !gameState.rewardsProcessed) {
         gameState.rewardsProcessed = true;
-        this.processRewards(room, gameState);
+        
+        // Prevent state blocking during async reward processing (fire and forget)
+        this.processRewards(room, gameState).catch(e => console.error('[TicTacToe] Reward processing error:', e));
         
         if (this.rooms && typeof this.rooms.scheduleRoomDelete === 'function') {
           this.rooms.scheduleRoomDelete(roomId, 60000);
         }
       } else if (room.status !== 'game_over') {
-        this.playBotTurn(roomId);
+        this.playBotTurn(roomId).catch(e => console.error('[TicTacToe] Bot turn error:', e));
       }
 
     } catch (error) {
@@ -303,6 +342,15 @@ class TicTacToeGameServer {
       const expectedRole = gameState.xIsNext ? 'X' : 'O';
       const playerId = gameState.players[expectedRole];
       const player = room.players[playerId];
+
+      // SECURITY: Validate that the socket triggering the bot belongs to the OTHER player
+      const otherRole = expectedRole === 'X' ? 'O' : 'X';
+      const otherPlayerId = gameState.players[otherRole];
+      
+      if (socket.userId && socket.userId !== otherPlayerId) {
+        console.warn(`[TicTacToe] Security Alert: Socket ${socket.id} (User: ${socket.userId}) attempted to trigger bot but is not the opponent.`);
+        return;
+      }
 
       if (player && player.isBot) {
         this.playBotTurn(roomId);
