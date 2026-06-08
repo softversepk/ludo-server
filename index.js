@@ -905,17 +905,28 @@ app.post('/api/club/leave', strictLimiter, authenticateFinancialRequest, async (
   try {
     const userId = req.userId;
     const db = admin.firestore();
+    
+    // Fetch the user first to make sure they exist and check their current club
     const userRef = db.collection('users').doc(userId);
+    const userDoc = await userRef.get();
+    
+    if (!userDoc.exists) {
+      return res.status(400).json({ error: 'User not found' });
+    }
+    
+    const clubId = userDoc.data().clubId;
+    if (!clubId) {
+      return res.status(400).json({ error: 'Not in a club' });
+    }
+
+    const clubRef = db.collection('clubs').doc(clubId);
 
     await db.runTransaction(async (transaction) => {
-      const userDoc = await transaction.get(userRef);
-      if (!userDoc.exists) throw new Error('User not found');
+      // Re-read user to satisfy transaction read-before-write requirement
+      const tUserDoc = await transaction.get(userRef);
+      if (!tUserDoc.exists) throw new Error('User not found');
+      if (!tUserDoc.data().clubId) throw new Error('Not in a club');
 
-      const clubId = userDoc.data().clubId;
-      if (!clubId) throw new Error('Not in a club');
-
-      const clubRef = db.collection('clubs').doc(clubId);
-      
       // READ FIRST: It's possible the club doc was deleted, check first
       const clubDoc = await transaction.get(clubRef);
       
