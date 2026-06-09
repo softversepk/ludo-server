@@ -666,18 +666,54 @@ app.get('/stats', strictLimiter, (req, res) => {
 });
 
 // CLUB MANAGEMENT ENDPOINTS (Secure Backend Logic)
+// --- BANK LEVEL SECURITY: Anti-Spam Tracker for Club Creation ---
+const createClubTracker = new Map();
+const MAX_CREATE_ATTEMPTS = 5;
+const CREATE_LOCKOUT_MS = 60 * 60 * 1000; // 1 hour lockout for spamming
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [userId, data] of createClubTracker.entries()) {
+    if (data.lockoutUntil < now) {
+      createClubTracker.delete(userId);
+    }
+  }
+}, 2 * 60 * 60 * 1000);
+
+// Basic HTML sanitizer to prevent XSS in club names/descriptions
+const sanitizeString = (str) => {
+  if (!str) return '';
+  return str.replace(/[<>]/g, '').trim();
+};
+
 app.post('/api/club/create', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { name, description, badge, isPrivate } = req.body;
     const userId = req.userId;
 
+    // 1. Anti-Spam Check
+    const now = Date.now();
+    const tracker = createClubTracker.get(userId) || { attempts: 0, lockoutUntil: 0 };
+    
+    if (tracker.lockoutUntil > now) {
+      const remainingTime = Math.ceil((tracker.lockoutUntil - now) / 1000 / 60);
+      return res.status(200).json({ 
+        success: false, 
+        error: `Too many club creation attempts. Try again in ${remainingTime} minutes.` 
+      });
+    }
+
+    // 2. Strict Input Validation & Sanitization
     if (!name || typeof name !== 'string' || name.trim().length < 3 || name.trim().length > 30) {
-      return res.status(400).json({ error: 'Invalid club name. Must be 3-30 characters.' });
+      return res.status(200).json({ success: false, error: 'Invalid club name. Must be 3-30 characters.' });
     }
 
     if (description && (typeof description !== 'string' || description.length > 200)) {
-      return res.status(400).json({ error: 'Description too long (max 200 characters).' });
+      return res.status(200).json({ success: false, error: 'Description too long (max 200 characters).' });
     }
+
+    const cleanName = sanitizeString(name);
+    const cleanDesc = sanitizeString(description);
 
     const validBadges = ['shield', 'flag', 'trophy', 'star', 'ribbon', 'diamond', 'skull', 'flash', 'heart', 'flame', 'medal', 'planet', 'rocket', 'thunderstorm', 'water'];
     const clubBadge = validBadges.includes(badge) ? badge : 'shield';
@@ -685,10 +721,10 @@ app.post('/api/club/create', strictLimiter, authenticateFinancialRequest, async 
     const db = admin.firestore();
     const userRef = db.collection('users').doc(userId);
 
-    // Generate invite code
+    // 3. Secure Invite Code Generation (8 chars for higher entropy)
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     let inviteCode = '';
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 8; i++) {
       inviteCode += chars.charAt(Math.floor(Math.random() * chars.length));
     }
 
@@ -696,22 +732,30 @@ app.post('/api/club/create', strictLimiter, authenticateFinancialRequest, async 
     let newClub = null;
 
     await db.runTransaction(async (transaction) => {
+      // READ FIRST
       const userDoc = await transaction.get(userRef);
       if (!userDoc.exists) throw new Error('User not found');
 
-      if (userDoc.data().clubId) {
-        throw new Error('User is already in a club');
+      const userData = userDoc.data();
+      
+      // 4. Prevent banned/suspended users
+      if (userData.isBanned || userData.isSuspended) {
+        throw new Error('Your account is restricted from creating clubs');
+      }
+
+      if (userData.clubId) {
+        throw new Error('You are already in a club. Leave it first.');
       }
 
       const clubRef = db.collection('clubs').doc();
       clubId = clubRef.id;
 
       newClub = {
-        name: name.trim(),
-        description: description ? description.trim() : '',
+        name: cleanName,
+        description: cleanDesc,
         badge: clubBadge,
         ownerId: userId,
-        ownerName: userDoc.data().username || 'Unknown',
+        ownerName: userData.username || 'Unknown',
         memberCount: 1,
         maxMembers: 50,
         minLevel: 1,
@@ -732,14 +776,31 @@ app.post('/api/club/create', strictLimiter, authenticateFinancialRequest, async 
 
       transaction.update(userRef, {
         clubId: clubId,
-        clubRole: 'owner'
+        clubRole: 'owner',
+        createdClubAt: admin.firestore.FieldValue.serverTimestamp() // 5. Audit trail
       });
     });
+
+    // Reset spam tracker on success
+    createClubTracker.delete(userId);
 
     res.status(200).json({ success: true, clubId, club: newClub });
   } catch (error) {
     console.error('Error creating club:', error.message);
-    res.status(400).json({ success: false, error: error.message });
+    
+    // Track failed attempts
+    const userId = req.userId;
+    if (userId) {
+      const tracker = createClubTracker.get(userId) || { attempts: 0, lockoutUntil: 0 };
+      tracker.attempts += 1;
+      if (tracker.attempts >= MAX_CREATE_ATTEMPTS) {
+        tracker.lockoutUntil = Date.now() + CREATE_LOCKOUT_MS;
+        tracker.attempts = 0;
+      }
+      createClubTracker.set(userId, tracker);
+    }
+
+    res.status(200).json({ success: false, error: error.message });
   }
 });
 
