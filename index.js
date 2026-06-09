@@ -1091,13 +1091,20 @@ app.post('/api/club/update-settings', strictLimiter, authenticateFinancialReques
     const { clubId, name, description, maxMembers, isPrivate, minLevel, badge } = req.body;
     const userId = req.userId;
 
-    if (!clubId || !name || typeof name !== 'string' || name.trim().length < 3 || name.trim().length > 30) {
-      return res.status(400).json({ error: 'Invalid club name. Must be 3-30 characters.' });
+    if (!clubId || typeof clubId !== 'string' || clubId.length > 50) {
+      return res.status(200).json({ success: false, error: 'Invalid club ID' });
+    }
+
+    if (!name || typeof name !== 'string' || name.trim().length < 3 || name.trim().length > 30) {
+      return res.status(200).json({ success: false, error: 'Invalid club name. Must be 3-30 characters.' });
     }
 
     if (description && (typeof description !== 'string' || description.length > 200)) {
-      return res.status(400).json({ error: 'Description too long (max 200 characters).' });
+      return res.status(200).json({ success: false, error: 'Description too long (max 200 characters).' });
     }
+
+    const cleanName = sanitizeString(name);
+    const cleanDesc = sanitizeString(description);
 
     let parsedMaxMembers = parseInt(maxMembers) || 50;
     if (parsedMaxMembers < 1 || parsedMaxMembers > 100) parsedMaxMembers = 50; // Add upper limit for security
@@ -1110,31 +1117,41 @@ app.post('/api/club/update-settings', strictLimiter, authenticateFinancialReques
 
     const db = admin.firestore();
     const clubRef = db.collection('clubs').doc(clubId);
+    const userRef = db.collection('users').doc(userId);
 
     await db.runTransaction(async (transaction) => {
+      // Security Check: Verify user is not banned
+      const userDoc = await transaction.get(userRef);
+      if (!userDoc.exists) throw new Error('User not found');
+      if (userDoc.data().isBanned || userDoc.data().isSuspended) {
+        throw new Error('Your account is restricted');
+      }
+
       const clubDoc = await transaction.get(clubRef);
       if (!clubDoc.exists) throw new Error('Club not found');
 
       const clubData = clubDoc.data();
+      
+      // Strict ownership validation
       if (clubData.ownerId !== userId) {
-        throw new Error('Only the club owner can update settings');
+        throw new Error('Unauthorized: Only the club owner can update settings');
       }
 
       transaction.update(clubRef, {
-        name: name.trim(),
-        description: description ? description.trim() : '',
+        name: cleanName,
+        description: cleanDesc,
         maxMembers: parsedMaxMembers,
         isPrivate: !!isPrivate,
         minLevel: parsedMinLevel,
         badge: clubBadge,
-        updatedAt: new Date().toISOString()
+        updatedAt: admin.firestore.FieldValue.serverTimestamp() // Secure server time
       });
     });
 
     res.status(200).json({ success: true, message: 'Club settings updated' });
   } catch (error) {
     console.error('Error updating club settings:', error.message);
-    res.status(400).json({ success: false, error: error.message });
+    res.status(200).json({ success: false, error: error.message });
   }
 });
 
