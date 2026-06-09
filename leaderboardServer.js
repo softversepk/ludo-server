@@ -62,7 +62,9 @@ class LeaderboardServer {
       clubsSnapshot.docs.forEach((doc) => {
         const data = doc.data();
         newClubs.set(doc.id, {
+          id: doc.id,
           clubId: doc.id,
+          name: data.name || 'Unknown',
           clubName: data.name || 'Unknown',
           badge: data.badge || 'shield',
           points: data.totalPoints || 0,
@@ -274,9 +276,9 @@ class LeaderboardServer {
   /**
    * Internal method to handle club points update (Secure, called from backend)
    */
-  updateClubInternal({ clubId, clubName, badge, points, memberCount, gamesPlayed }) {
+  updateClubInternal({ clubId, clubName, badge, points, weeklyPoints, memberCount, gamesPlayed }) {
     try {
-      console.log(`🏆 [CLUB UPDATE SECURE] ${clubName}: Points ${points}`);
+      console.log(`🏆 [CLUB UPDATE SECURE] ${clubName}: Points ${points}, Weekly ${weeklyPoints}`);
 
       // Get current club data
       const currentData = this.clubLeaderboard.get(clubId) || {};
@@ -284,12 +286,16 @@ class LeaderboardServer {
 
       // Update club data
       const clubData = {
+        ...currentData,
+        id: clubId,
         clubId,
-        clubName,
-        badge,
-        points: points || 0,
-        memberCount: memberCount || 0,
-        gamesPlayed: gamesPlayed || 0,
+        name: clubName || currentData.name,
+        clubName: clubName || currentData.clubName,
+        badge: badge || currentData.badge,
+        points: points !== undefined ? points : currentData.points,
+        weeklyPoints: weeklyPoints !== undefined ? weeklyPoints : currentData.weeklyPoints,
+        memberCount: memberCount !== undefined ? memberCount : currentData.memberCount,
+        gamesPlayed: gamesPlayed !== undefined ? gamesPlayed : currentData.gamesPlayed,
         lastUpdated: Date.now()
       };
 
