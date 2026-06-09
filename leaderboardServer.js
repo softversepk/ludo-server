@@ -55,6 +55,34 @@ class LeaderboardServer {
       
       this.playerLeaderboard = newPlayers;
       console.log(`✅ [LEADERBOARD SECURE] Fetched ${this.playerLeaderboard.size} players from Firebase`);
+
+      // Fetch all clubs to populate club leaderboard and league data
+      const clubsSnapshot = await db.collection('clubs').get();
+      const newClubs = new Map();
+      clubsSnapshot.docs.forEach((doc) => {
+        const data = doc.data();
+        newClubs.set(doc.id, {
+          clubId: doc.id,
+          clubName: data.name || 'Unknown',
+          badge: data.badge || 'shield',
+          points: data.totalPoints || 0,
+          weeklyPoints: data.weeklyPoints || 0,
+          memberCount: data.memberCount || 0,
+          gamesPlayed: data.totalGames || 0,
+          currentLeagueOrder: data.currentLeagueOrder || 1,
+          createdAt: data.createdAt || 0,
+          description: data.description || '',
+          ownerName: data.ownerName || 'Unknown',
+          isPrivate: data.isPrivate || false,
+          inviteCode: data.inviteCode || '',
+          rank: 0, // Will be calculated
+          lastUpdated: Date.now()
+        });
+      });
+
+      this.clubLeaderboard = newClubs;
+      this.recalculateClubRanks();
+      console.log(`✅ [LEADERBOARD SECURE] Fetched ${this.clubLeaderboard.size} clubs from Firebase`);
       
     } catch (error) {
       console.error('❌ [LEADERBOARD SECURE] Error fetching from Firebase:', error);
@@ -85,6 +113,9 @@ class LeaderboardServer {
       // Request club rank
       socket.on('leaderboard:get_club_rank', (data) => this.handleGetClubRank(socket, data));
 
+      // Request league ranks
+      socket.on('leaderboard:get_league_ranks', (data) => this.handleGetLeagueRanks(socket, data));
+
       // Disconnection
       socket.on('disconnect', () => this.handleDisconnect(socket));
     });
@@ -99,14 +130,15 @@ class LeaderboardServer {
   /**
    * Handle subscribe to leaderboard updates
    */
-  handleSubscribe(socket, { userId, type = 'both' }) {
+  handleSubscribe(socket, { userId, type = 'both', leagueOrder = null }) {
     try {
-      console.log(`📊 [LEADERBOARD] User ${userId} subscribing to ${type}`);
+      console.log(`📊 [LEADERBOARD] User ${userId} subscribing to ${type}${leagueOrder ? ' league ' + leagueOrder : ''}`);
 
       // Track subscription
       this.subscribedUsers.set(socket.id, {
         userId,
         subscriptions: type, // 'players', 'clubs', or 'both'
+        leagueOrder: leagueOrder,
         subscribedAt: Date.now()
       });
 
@@ -116,6 +148,11 @@ class LeaderboardServer {
       }
       if (type === 'clubs' || type === 'both') {
         socket.join('leaderboard:clubs');
+      }
+      if (leagueOrder) {
+        socket.join(`leaderboard:league:${leagueOrder}`);
+        // Send initial league data immediately
+        this.handleGetLeagueRanks(socket, { leagueOrder });
       }
 
       // Send current leaderboard immediately
@@ -136,7 +173,7 @@ class LeaderboardServer {
   /**
    * Handle unsubscribe from leaderboard
    */
-  handleUnsubscribe(socket, { type = 'both' }) {
+  handleUnsubscribe(socket, { type = 'both', leagueOrder = null }) {
     try {
       if (type === 'players' || type === 'both') {
         socket.leave('leaderboard:players');
@@ -144,9 +181,12 @@ class LeaderboardServer {
       if (type === 'clubs' || type === 'both') {
         socket.leave('leaderboard:clubs');
       }
+      if (leagueOrder) {
+        socket.leave(`leaderboard:league:${leagueOrder}`);
+      }
 
       this.subscribedUsers.delete(socket.id);
-      console.log(`👋 [LEADERBOARD] User unsubscribed from ${type}`);
+      console.log(`👋 [LEADERBOARD] User unsubscribed from ${type}${leagueOrder ? ' league ' + leagueOrder : ''}`);
     } catch (error) {
       console.error('❌ [LEADERBOARD UNSUBSCRIBE ERROR]', error);
     }
@@ -341,6 +381,55 @@ class LeaderboardServer {
   }
 
   /**
+   * Handle get league ranks request
+   */
+  handleGetLeagueRanks(socket, { leagueOrder }) {
+    try {
+      const clubsInLeague = Array.from(this.clubLeaderboard.values())
+        .filter(club => club.currentLeagueOrder === leagueOrder)
+        .sort((a, b) => b.weeklyPoints - a.weeklyPoints);
+
+      clubsInLeague.forEach((club, index) => {
+        club.rank = index + 1;
+      });
+
+      const now = new Date();
+      const nextMonday = new Date(now);
+      const currentDay = nextMonday.getDay();
+      const daysUntilMonday = currentDay === 0 ? 1 : 8 - currentDay;
+      nextMonday.setDate(nextMonday.getDate() + daysUntilMonday);
+      nextMonday.setHours(0, 0, 0, 0);
+
+      const timeRemaining = nextMonday.getTime() - now.getTime();
+      const days = Math.floor(timeRemaining / (1000 * 60 * 60 * 24));
+      const hours = Math.floor((timeRemaining % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+      const minutes = Math.floor((timeRemaining % (1000 * 60 * 60)) / (1000 * 60));
+      const seconds = Math.floor((timeRemaining % (1000 * 60)) / 1000);
+
+      const countdown = { days, hours, minutes, seconds, expired: timeRemaining <= 0 };
+
+      let CLUB_LEAGUES = [];
+      try {
+        CLUB_LEAGUES = require('./utils/clubLeagues');
+      } catch (e) {
+        console.warn('⚠️ Could not load clubLeagues, using default');
+      }
+      
+      const currentLeague = CLUB_LEAGUES.find(l => l.order === leagueOrder) || { name: 'Unknown', order: leagueOrder };
+
+      socket.emit('leaderboard:league_ranks', {
+        leagueOrder,
+        clubs: clubsInLeague,
+        countdown,
+        currentLeague
+      });
+    } catch (error) {
+      console.error('❌ [GET LEAGUE RANKS ERROR]', error);
+      socket.emit('leaderboard:rank_error', { error: error.message });
+    }
+  }
+
+  /**
    * Handle disconnection
    */
   handleDisconnect(socket) {
@@ -492,7 +581,48 @@ class LeaderboardServer {
         timestamp: Date.now()
       });
 
-      console.log(`📊 [LEADERBOARD] Periodic update sent. Players: ${this.playerLeaderboard.size}, Clubs: ${this.clubLeaderboard.size}`);
+      // Broadcast to league rooms
+      const activeLeagues = new Set(Array.from(this.subscribedUsers.values()).map(sub => sub.leagueOrder).filter(Boolean));
+      
+      const now = new Date();
+      const nextMonday = new Date(now);
+      const currentDay = nextMonday.getDay();
+      const daysUntilMonday = currentDay === 0 ? 1 : 8 - currentDay;
+      nextMonday.setDate(nextMonday.getDate() + daysUntilMonday);
+      nextMonday.setHours(0, 0, 0, 0);
+
+      const timeRemaining = nextMonday.getTime() - now.getTime();
+      const days = Math.floor(timeRemaining / (1000 * 60 * 60 * 24));
+      const hours = Math.floor((timeRemaining % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+      const minutes = Math.floor((timeRemaining % (1000 * 60 * 60)) / (1000 * 60));
+      const seconds = Math.floor((timeRemaining % (1000 * 60)) / 1000);
+      const countdown = { days, hours, minutes, seconds, expired: timeRemaining <= 0 };
+
+      let CLUB_LEAGUES = [];
+      try {
+        CLUB_LEAGUES = require('./utils/clubLeagues');
+      } catch (e) {}
+
+      activeLeagues.forEach(leagueOrder => {
+        const clubsInLeague = Array.from(this.clubLeaderboard.values())
+          .filter(club => club.currentLeagueOrder === leagueOrder)
+          .sort((a, b) => b.weeklyPoints - a.weeklyPoints);
+
+        clubsInLeague.forEach((club, index) => {
+          club.rank = index + 1;
+        });
+
+        const currentLeague = CLUB_LEAGUES.find(l => l.order === leagueOrder) || { name: 'Unknown', order: leagueOrder };
+
+        this.io.to(`leaderboard:league:${leagueOrder}`).emit('leaderboard:league_ranks_update', {
+          leagueOrder,
+          clubs: clubsInLeague,
+          countdown,
+          currentLeague
+        });
+      });
+
+      console.log(`📊 [LEADERBOARD] Periodic update sent. Players: ${this.playerLeaderboard.size}, Clubs: ${this.clubLeaderboard.size}, Leagues updated: ${activeLeagues.size}`);
     }, 30000); // Every 30 seconds
   }
 
