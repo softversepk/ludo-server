@@ -1025,6 +1025,15 @@ app.post('/api/club/join', strictLimiter, authenticateFinancialRequest, async (r
       });
     });
 
+    // Optional: Real-time Socket.IO notification for direct join (Public Club / Invite Code Join)
+    if (global.io) {
+      global.io.to(`club:${targetClubId}`).emit('club:member_joined_direct', {
+        userId,
+        timestamp: Date.now(),
+        message: 'A new member has joined the club directly!'
+      });
+    }
+
     // Reset tracker on success
     joinAttemptTracker.delete(userId);
 
@@ -1032,6 +1041,196 @@ app.post('/api/club/join', strictLimiter, authenticateFinancialRequest, async (r
   } catch (error) {
     console.error('Error joining club:', error.message);
     // Return 200 OK with success: false to prevent client-side 400 Bad Request console errors
+    res.status(200).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/club/request-join', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { clubId } = req.body;
+    const userId = req.userId;
+
+    if (!clubId || typeof clubId !== 'string' || clubId.length > 50) {
+      return res.status(200).json({ success: false, error: 'Invalid club ID' });
+    }
+
+    const db = admin.firestore();
+    const userRef = db.collection('users').doc(userId);
+    const clubRef = db.collection('clubs').doc(clubId);
+    const requestRef = clubRef.collection('joinRequests').doc(userId);
+
+    await db.runTransaction(async (transaction) => {
+      const userDoc = await transaction.get(userRef);
+      if (!userDoc.exists) throw new Error('User not found');
+      
+      const userData = userDoc.data();
+      if (userData.clubId) throw new Error('You are already in a club');
+      if (userData.isBanned || userData.isSuspended) throw new Error('Your account is restricted');
+
+      const clubDoc = await transaction.get(clubRef);
+      if (!clubDoc.exists) throw new Error('Club not found');
+
+      const clubData = clubDoc.data();
+      if (!clubData.isPrivate) {
+        throw new Error('This club is public. You can join directly.');
+      }
+      
+      if (clubData.memberCount >= (clubData.maxMembers || 50)) {
+        throw new Error('Club is full');
+      }
+
+      const requestDoc = await transaction.get(requestRef);
+      if (requestDoc.exists) {
+        throw new Error('You have already sent a request to this club');
+      }
+
+      // Add request
+      transaction.set(requestRef, {
+        userId,
+        username: userData.username || 'Player',
+        avatar: userData.avatar || 'default',
+        level: userData.level || 1,
+        status: 'pending',
+        requestedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    });
+
+    res.status(200).json({ success: true, message: 'Join request sent successfully' });
+  } catch (error) {
+    console.error('Error requesting to join club:', error.message);
+    res.status(200).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/club/requests', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { clubId } = req.query;
+    const userId = req.userId;
+
+    if (!clubId || typeof clubId !== 'string') {
+      return res.status(200).json({ success: false, error: 'Invalid club ID' });
+    }
+
+    const db = admin.firestore();
+    const clubRef = db.collection('clubs').doc(clubId);
+    const clubDoc = await clubRef.get();
+
+    if (!clubDoc.exists) {
+      return res.status(200).json({ success: false, error: 'Club not found' });
+    }
+
+    if (clubDoc.data().ownerId !== userId) {
+      return res.status(200).json({ success: false, error: 'Unauthorized: Only club owner can view requests' });
+    }
+
+    const requestsSnapshot = await clubRef.collection('joinRequests').where('status', '==', 'pending').get();
+    const requests = [];
+    requestsSnapshot.forEach(doc => {
+      requests.push({ id: doc.id, ...doc.data() });
+    });
+
+    res.status(200).json({ success: true, requests });
+  } catch (error) {
+    console.error('Error fetching club requests:', error.message);
+    res.status(200).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/club/handle-request', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { clubId, requestId, action } = req.body; // action = 'approve' | 'reject'
+    const userId = req.userId;
+
+    if (!clubId || !requestId || !['approve', 'reject'].includes(action)) {
+      return res.status(200).json({ success: false, error: 'Invalid parameters' });
+    }
+
+    const db = admin.firestore();
+    const clubRef = db.collection('clubs').doc(clubId);
+    const requestRef = clubRef.collection('joinRequests').doc(requestId);
+    const requesterRef = db.collection('users').doc(requestId);
+    const notificationRef = db.collection('notifications').doc();
+
+    await db.runTransaction(async (transaction) => {
+      const clubDoc = await transaction.get(clubRef);
+      if (!clubDoc.exists) throw new Error('Club not found');
+
+      const clubData = clubDoc.data();
+      if (clubData.ownerId !== userId) {
+        throw new Error('Unauthorized: Only club owner can handle requests');
+      }
+
+      const requestDoc = await transaction.get(requestRef);
+      if (!requestDoc.exists || requestDoc.data().status !== 'pending') {
+        throw new Error('Request not found or already processed');
+      }
+
+      const requesterDoc = await transaction.get(requesterRef);
+      if (!requesterDoc.exists) {
+        transaction.delete(requestRef);
+        throw new Error('User no longer exists');
+      }
+
+      if (action === 'approve') {
+        const requesterData = requesterDoc.data();
+        if (requesterData.clubId) {
+          transaction.update(requestRef, { status: 'rejected_automatically', reason: 'User already in another club' });
+          throw new Error('User is already in another club');
+        }
+        if (clubData.memberCount >= (clubData.maxMembers || 50)) {
+          throw new Error('Club is full');
+        }
+
+        // Approve
+        transaction.update(clubRef, { memberCount: admin.firestore.FieldValue.increment(1) });
+        transaction.update(requesterRef, { 
+          clubId, 
+          clubRole: 'member', 
+          joinedClubAt: admin.firestore.FieldValue.serverTimestamp() 
+        });
+        transaction.delete(requestRef); // Remove request
+
+        // Send Notification
+        transaction.set(notificationRef, {
+          userId: requestId,
+          type: 'club_join_approved',
+          title: 'Club Request Approved',
+          message: `Your request to join ${clubData.name} has been approved!`,
+          clubId,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          read: false
+        });
+
+      } else if (action === 'reject') {
+        // Reject
+        transaction.delete(requestRef); // Remove request
+
+        // Send Notification
+        transaction.set(notificationRef, {
+          userId: requestId,
+          type: 'club_join_rejected',
+          title: 'Club Request Rejected',
+          message: `Your request to join ${clubData.name} was declined by the admin.`,
+          clubId,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          read: false
+        });
+      }
+    });
+
+    // Optional: Use Socket.IO to emit real-time notification to the user if they are online
+    if (global.io) {
+      // Find socket for user
+      // Normally you'd map userId to socket.id, assuming you have it in userSockets map or via a room
+      global.io.to(`user:${requestId}`).emit('notification', {
+        type: action === 'approve' ? 'club_join_approved' : 'club_join_rejected',
+        clubId
+      });
+    }
+
+    res.status(200).json({ success: true, message: `Request ${action}d successfully` });
+  } catch (error) {
+    console.error('Error handling club request:', error.message);
     res.status(200).json({ success: false, error: error.message });
   }
 });
