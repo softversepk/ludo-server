@@ -312,6 +312,12 @@ class LeaderboardServer {
         });
       }
 
+      // 🏆 IMMEDIATE LEAGUE BROADCAST (Bank-Level Secure Realtime)
+      // When a club's points update, we instantly push the new sorted ranks to that specific league's WebSocket room.
+      // This completely removes the need for Firebase realtime listeners on the frontend ranks screen.
+      const leagueOrder = currentData.currentLeagueOrder || 1;
+      this.broadcastLeagueRanksUpdate(leagueOrder);
+
       console.log(`✅ [CLUB UPDATE SECURE] ${clubName} now rank #${newRank}`);
       return { success: true, rank: newRank };
     } catch (error) {
