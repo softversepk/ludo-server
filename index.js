@@ -839,24 +839,55 @@ app.get('/api/club/search', strictLimiter, authenticateFinancialRequest, async (
   }
 });
 
+// --- BANK LEVEL SECURITY: Anti-Brute Force Tracker for Club Joins ---
+const joinAttemptTracker = new Map();
+const MAX_JOIN_ATTEMPTS = 5;
+const JOIN_LOCKOUT_MS = 15 * 60 * 1000; // 15 mins
+// Cleanup interval to prevent memory leaks
+setInterval(() => {
+  const now = Date.now();
+  for (const [userId, data] of joinAttemptTracker.entries()) {
+    if (data.lockoutUntil < now && data.attempts === 0) {
+      joinAttemptTracker.delete(userId);
+    }
+  }
+}, 60 * 60 * 1000);
+
 app.post('/api/club/join', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
     const { clubId, inviteCode } = req.body;
     const userId = req.userId;
 
+    // 1. Bank-level Security: Anti-Brute Force on Join/Invite Code
+    const now = Date.now();
+    const tracker = joinAttemptTracker.get(userId) || { attempts: 0, lockoutUntil: 0 };
+    
+    if (tracker.lockoutUntil > now) {
+      const remainingTime = Math.ceil((tracker.lockoutUntil - now) / 1000 / 60);
+      return res.status(200).json({ 
+        success: false, 
+        error: `Too many failed attempts. Try again in ${remainingTime} minutes.` 
+      });
+    }
+
+    // 2. Strict Input Validation & Sanitization
     if (!clubId && !inviteCode) {
-      return res.status(400).json({ error: 'Club ID or Invite Code required' });
+      return res.status(200).json({ success: false, error: 'Club ID or Invite Code required' });
+    }
+    
+    if (inviteCode && (typeof inviteCode !== 'string' || inviteCode.length > 20)) {
+      return res.status(200).json({ success: false, error: 'Invalid invite code format' });
+    }
+    
+    if (clubId && (typeof clubId !== 'string' || clubId.length > 50)) {
+      return res.status(200).json({ success: false, error: 'Invalid club ID format' });
     }
 
     const db = admin.firestore();
     const userRef = db.collection('users').doc(userId);
     
-    // We will determine the clubRef inside the transaction if we only have inviteCode,
-    // but Firestore transactions require reads before writes.
-    // So let's look up the club by invite code first if clubId is not provided.
     let targetClubId = clubId;
     if (!targetClubId && inviteCode) {
-      // Secure exact match only to prevent memory exhaustion / DoS attacks
       const cleanInviteCode = inviteCode.trim().toUpperCase();
       let clubsSnapshot = await db.collection('clubs')
         .where('inviteCode', '==', cleanInviteCode)
@@ -864,14 +895,22 @@ app.post('/api/club/join', strictLimiter, authenticateFinancialRequest, async (r
         .get();
       
       if (clubsSnapshot.empty) {
-        return res.status(400).json({ error: 'Invalid invite code' });
+        // Track failed attempt to prevent code guessing (brute force)
+        tracker.attempts += 1;
+        if (tracker.attempts >= MAX_JOIN_ATTEMPTS) {
+          tracker.lockoutUntil = now + JOIN_LOCKOUT_MS;
+          tracker.attempts = 0; // Reset after lockout triggers
+        }
+        joinAttemptTracker.set(userId, tracker);
+        
+        return res.status(200).json({ success: false, error: 'Invalid invite code' });
       }
       
       targetClubId = clubsSnapshot.docs[0].id;
     }
 
     if (!targetClubId) {
-      return res.status(400).json({ error: 'Could not determine club ID' });
+      return res.status(200).json({ success: false, error: 'Could not determine club ID' });
     }
 
     const clubRef = db.collection('clubs').doc(targetClubId);
@@ -883,6 +922,11 @@ app.post('/api/club/join', strictLimiter, authenticateFinancialRequest, async (r
       
       const userData = userDoc.data();
       if (userData.clubId) throw new Error('Already in a club');
+
+      // 3. Prevent banned/suspended users from joining
+      if (userData.isBanned || userData.isSuspended) {
+        throw new Error('Your account is restricted from joining clubs');
+      }
 
       const clubDoc = await transaction.get(clubRef);
       if (!clubDoc.exists) throw new Error('Club not found');
@@ -904,9 +948,7 @@ app.post('/api/club/join', strictLimiter, authenticateFinancialRequest, async (r
 
       // Check if private and verify invite code
       if (clubData.isPrivate) {
-        // If they provided a code, verify it. (If they are joining via search results or regular join without code, 
-        // they shouldn't be able to join a private club anyway unless invited. For now, strict check:)
-        if (!inviteCode || (clubData.inviteCode && inviteCode.toUpperCase() !== clubData.inviteCode.toUpperCase())) {
+        if (!inviteCode || (clubData.inviteCode && inviteCode.trim().toUpperCase() !== clubData.inviteCode.toUpperCase())) {
           throw new Error('Invalid invite code for private club');
         }
       }
@@ -917,14 +959,19 @@ app.post('/api/club/join', strictLimiter, authenticateFinancialRequest, async (r
 
       transaction.update(userRef, {
         clubId: targetClubId,
-        clubRole: 'member'
+        clubRole: 'member',
+        joinedClubAt: admin.firestore.FieldValue.serverTimestamp() // 4. Audit trail
       });
     });
+
+    // Reset tracker on success
+    joinAttemptTracker.delete(userId);
 
     res.status(200).json({ success: true, message: 'Joined club successfully', clubId: targetClubId });
   } catch (error) {
     console.error('Error joining club:', error.message);
-    res.status(400).json({ success: false, error: error.message });
+    // Return 200 OK with success: false to prevent client-side 400 Bad Request console errors
+    res.status(200).json({ success: false, error: error.message });
   }
 });
 
