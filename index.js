@@ -1126,8 +1126,17 @@ app.get('/api/club/requests', strictLimiter, authenticateFinancialRequest, async
       return res.status(200).json({ success: false, error: 'Club not found' });
     }
 
-    if (clubDoc.data().ownerId !== userId) {
-      return res.status(200).json({ success: false, error: 'Unauthorized: Only club owner can view requests' });
+    const userDoc = await db.collection('users').doc(userId).get();
+    if (!userDoc.exists) {
+      return res.status(200).json({ success: false, error: 'User not found' });
+    }
+
+    const userData = userDoc.data();
+    const isOwner = clubDoc.data().ownerId === userId;
+    const hasAdminRole = userData.clubId === clubId && ['owner', 'admin', 'mini-admin', 'supervisor'].includes(userData.clubRole);
+
+    if (!isOwner && !hasAdminRole) {
+      return res.status(200).json({ success: false, error: 'Unauthorized: Only club admins can view requests' });
     }
 
     const requestsSnapshot = await clubRef.collection('joinRequests').where('status', '==', 'pending').get();
@@ -1157,14 +1166,21 @@ app.post('/api/club/handle-request', strictLimiter, authenticateFinancialRequest
     const requestRef = clubRef.collection('joinRequests').doc(requestId);
     const requesterRef = db.collection('users').doc(requestId);
     const notificationRef = db.collection('notifications').doc();
+    const actionUserRef = db.collection('users').doc(userId);
 
     await db.runTransaction(async (transaction) => {
       const clubDoc = await transaction.get(clubRef);
       if (!clubDoc.exists) throw new Error('Club not found');
 
-      const clubData = clubDoc.data();
-      if (clubData.ownerId !== userId) {
-        throw new Error('Unauthorized: Only club owner can handle requests');
+      const actionUserDoc = await transaction.get(actionUserRef);
+      if (!actionUserDoc.exists) throw new Error('Actioning user not found');
+
+      const actionUserData = actionUserDoc.data();
+      const isOwner = clubDoc.data().ownerId === userId;
+      const hasAdminRole = actionUserData.clubId === clubId && ['owner', 'admin', 'mini-admin', 'supervisor'].includes(actionUserData.clubRole);
+
+      if (!isOwner && !hasAdminRole) {
+        throw new Error('Unauthorized: Only club admins can handle requests');
       }
 
       const requestDoc = await transaction.get(requestRef);
@@ -1177,6 +1193,8 @@ app.post('/api/club/handle-request', strictLimiter, authenticateFinancialRequest
         transaction.delete(requestRef);
         throw new Error('User no longer exists');
       }
+
+      const clubData = clubDoc.data();
 
       if (action === 'approve') {
         const requesterData = requesterDoc.data();
