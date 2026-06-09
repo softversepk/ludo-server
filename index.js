@@ -812,17 +812,31 @@ app.get('/api/club/search', strictLimiter, authenticateFinancialRequest, async (
     
     let clubsQuery;
     let codeClubs = [];
+
+    // Helper to safely extract only non-sensitive public club info
+    const extractSafeClubData = (id, data) => ({
+      id,
+      name: data.name,
+      description: data.description,
+      badge: data.badge,
+      memberCount: data.memberCount,
+      totalPoints: data.totalPoints,
+      totalWins: data.totalWins,
+      isPrivate: data.isPrivate,
+      minLevel: data.minLevel,
+      maxMembers: data.maxMembers,
+      createdAt: data.createdAt,
+      ownerName: data.ownerName
+    });
     
     if (!searchTerm) {
-      // Return top public clubs
+      // Return top clubs (public and private)
       clubsQuery = db.collection('clubs')
-        .where('isPrivate', '==', false)
         .orderBy('totalPoints', 'desc')
         .limit(100);
     } else {
       // Search by name
       clubsQuery = db.collection('clubs')
-        .where('isPrivate', '==', false)
         .where('name', '>=', searchTerm)
         .where('name', '<=', searchTerm + '\uf8ff')
         .limit(100);
@@ -834,9 +848,7 @@ app.get('/api/club/search', strictLimiter, authenticateFinancialRequest, async (
           .limit(1);
         const codeSnap = await codeQuery.get();
         codeSnap.forEach(doc => {
-          const data = doc.data();
-          delete data.inviteCode;
-          codeClubs.push({ id: doc.id, ...data });
+          codeClubs.push(extractSafeClubData(doc.id, doc.data()));
         });
       } catch (err) {
         console.error('Error searching by invite code:', err.message);
@@ -850,10 +862,7 @@ app.get('/api/club/search', strictLimiter, authenticateFinancialRequest, async (
 
       snapshot.forEach(doc => {
         if (!addedIds.has(doc.id)) {
-          const data = doc.data();
-          // NEVER send inviteCode for search results to prevent hacking private/invite-only bypasses
-          delete data.inviteCode;
-          clubs.push({ id: doc.id, ...data });
+          clubs.push(extractSafeClubData(doc.id, doc.data()));
           addedIds.add(doc.id);
         }
       });
@@ -866,16 +875,14 @@ app.get('/api/club/search', strictLimiter, authenticateFinancialRequest, async (
       res.status(200).json({ success: true, clubs });
     } catch (indexError) {
       // Fallback if index is missing
-      const fallbackQuery = db.collection('clubs').where('isPrivate', '==', false).limit(100);
+      const fallbackQuery = db.collection('clubs').limit(100);
       const snapshot = await fallbackQuery.get();
       const clubs = [...codeClubs];
       const addedIds = new Set(clubs.map(c => c.id));
 
       snapshot.forEach(doc => {
         if (!addedIds.has(doc.id)) {
-          const data = doc.data();
-          delete data.inviteCode; // Secure the invite code
-          clubs.push({ id: doc.id, ...data });
+          clubs.push(extractSafeClubData(doc.id, doc.data()));
           addedIds.add(doc.id);
         }
       });
