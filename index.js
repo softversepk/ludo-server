@@ -1102,6 +1102,13 @@ app.post('/api/club/request-join', strictLimiter, authenticateFinancialRequest, 
       });
     });
 
+    if (global.io) {
+      global.io.to(`club:${clubId}`).emit('club:new_join_request', {
+        clubId,
+        hasNewRequest: true
+      });
+    }
+
     res.status(200).json({ success: true, message: 'Join request sent successfully' });
   } catch (error) {
     console.error('Error requesting to join club:', error.message);
@@ -1444,12 +1451,14 @@ app.post('/api/club/promote-member', strictLimiter, authenticateFinancialRequest
     const db = admin.firestore();
     const clubRef = db.collection('clubs').doc(clubId);
     const memberRef = db.collection('users').doc(memberId);
+    const notificationRef = db.collection('notifications').doc();
 
     await db.runTransaction(async (transaction) => {
       const clubDoc = await transaction.get(clubRef);
       if (!clubDoc.exists) throw new Error('Club not found');
 
-      if (clubDoc.data().ownerId !== userId) {
+      const clubData = clubDoc.data();
+      if (clubData.ownerId !== userId) {
         throw new Error('Only club owner can promote members');
       }
 
@@ -1458,10 +1467,39 @@ app.post('/api/club/promote-member', strictLimiter, authenticateFinancialRequest
         throw new Error('Member not found in this club');
       }
 
+      const oldRole = memberDoc.data().clubRole || 'member';
+
       transaction.update(memberRef, {
         clubRole: newRole
       });
+
+      // Send notification if role changed
+      if (oldRole !== newRole) {
+        let roleDisplay = newRole.charAt(0).toUpperCase() + newRole.slice(1);
+        if (newRole === 'mini-admin') roleDisplay = 'Mini Admin';
+        
+        const actionWord = (newRole === 'member') ? 'demoted' : 'promoted';
+        
+        transaction.set(notificationRef, {
+          userId: memberId,
+          type: 'club_role_updated',
+          title: 'Club Role Updated',
+          message: `You have been ${actionWord} to ${roleDisplay} in ${clubData.name || 'your club'}.`,
+          clubId,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          read: false
+        });
+      }
     });
+
+    // Optional: Use Socket.IO to emit real-time notification to the user if they are online
+    if (global.io) {
+      global.io.to(`user:${memberId}`).emit('notification', {
+        type: 'club_role_updated',
+        clubId,
+        newRole
+      });
+    }
 
     res.status(200).json({ success: true, message: `Member promoted to ${newRole}` });
   } catch (error) {
@@ -3049,7 +3087,8 @@ app.post('/api/game/update-stats', strictLimiter, authenticateFinancialRequest, 
                 clubId: clubDoc.id,
                 clubName: clubData.name || 'Club',
                 badge: clubData.badge || 'default',
-                points: clubData.totalPoints || clubData.weeklyPoints || clubData.totalWins || 0,
+                points: clubData.totalPoints || 0,
+                weeklyPoints: clubData.weeklyPoints || 0,
                 memberCount: clubData.memberCount || clubData.members?.length || 0,
                 gamesPlayed: clubData.totalGames || 0
               });
