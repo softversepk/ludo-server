@@ -114,7 +114,8 @@ class RewardServiceServer {
                 clubId: clubId,
                 clubName: finalClubData.name || 'Club',
                 badge: finalClubData.badge || 'default',
-                points: finalClubData.totalPoints || finalClubData.weeklyPoints || finalClubData.totalWins || 0,
+                points: finalClubData.totalPoints || 0,
+                weeklyPoints: finalClubData.weeklyPoints || 0,
                 memberCount: finalClubData.memberCount || finalClubData.members?.length || 0,
                 gamesPlayed: finalClubData.totalGames || 0
               });
@@ -178,7 +179,8 @@ class RewardServiceServer {
                   clubId: finalData.clubId,
                   clubName: finalClubData.name || 'Club',
                   badge: finalClubData.badge || 'default',
-                  points: finalClubData.totalPoints || finalClubData.weeklyPoints || finalClubData.totalWins || 0,
+                  points: finalClubData.totalPoints || 0,
+                  weeklyPoints: finalClubData.weeklyPoints || 0,
                   memberCount: finalClubData.memberCount || finalClubData.members?.length || 0,
                   gamesPlayed: finalClubData.totalGames || 0
                 });
@@ -239,7 +241,8 @@ class RewardServiceServer {
                   clubId: finalData.clubId,
                   clubName: finalClubData.name || 'Club',
                   badge: finalClubData.badge || 'default',
-                  points: finalClubData.totalPoints || finalClubData.weeklyPoints || finalClubData.totalWins || 0,
+                  points: finalClubData.totalPoints || 0,
+                  weeklyPoints: finalClubData.weeklyPoints || 0,
                   memberCount: finalClubData.memberCount || finalClubData.members?.length || 0,
                   gamesPlayed: finalClubData.totalGames || 0
                 });
