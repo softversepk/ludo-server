@@ -1404,10 +1404,12 @@ app.post('/api/club/kick-member', strictLimiter, authenticateFinancialRequest, a
     const { clubId, memberId } = req.body;
     const userId = req.userId;
 
+    // 1. Basic validation
     if (!clubId || !memberId) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
+    // 2. Prevent self-kicking
     if (memberId === userId) {
       return res.status(400).json({ error: 'Cannot kick yourself' });
     }
@@ -1415,33 +1417,78 @@ app.post('/api/club/kick-member', strictLimiter, authenticateFinancialRequest, a
     const db = admin.firestore();
     const clubRef = db.collection('clubs').doc(clubId);
     const memberRef = db.collection('users').doc(memberId);
+    const notificationRef = db.collection('notifications').doc();
+
+    let clubName = '';
 
     await db.runTransaction(async (transaction) => {
+      // 3. SECURE READ: Fetch club first
       const clubDoc = await transaction.get(clubRef);
       if (!clubDoc.exists) throw new Error('Club not found');
 
-      if (clubDoc.data().ownerId !== userId) {
-        throw new Error('Only club owner can kick members');
+      const clubData = clubDoc.data();
+      clubName = clubData.name || 'the club';
+
+      // 4. AUTHORIZATION: Strictly check if requester is the true owner
+      if (clubData.ownerId !== userId) {
+        throw new Error('Only the club owner has permission to kick members');
       }
 
+      // 5. SECURE CHECK: Prevent kicking the owner under any circumstances
+      if (clubData.ownerId === memberId) {
+        throw new Error('Cannot kick the club owner');
+      }
+
+      // 6. SECURE READ: Fetch member
       const memberDoc = await transaction.get(memberRef);
       if (!memberDoc.exists || memberDoc.data().clubId !== clubId) {
         throw new Error('Member not found in this club');
       }
 
+      // 7. SECURE WRITES: Remove club details from user
       transaction.update(memberRef, {
         clubId: admin.firestore.FieldValue.delete(),
         clubRole: admin.firestore.FieldValue.delete(),
         clubPoints: 0
       });
 
+      // 8. Safely decrement member count ensuring it doesn't drop below 1
+      const currentMemberCount = clubData.memberCount || 1;
+      const newMemberCount = Math.max(1, currentMemberCount - 1);
+
       transaction.update(clubRef, {
-        memberCount: admin.firestore.FieldValue.increment(-1),
+        memberCount: newMemberCount,
         privilegedMembers: admin.firestore.FieldValue.arrayRemove(memberId)
+      });
+
+      // 9. Audit/Notification: Inform the kicked user
+      transaction.set(notificationRef, {
+        userId: memberId,
+        type: 'club_kicked',
+        title: 'Removed from Club',
+        message: `You have been removed from ${clubName}.`,
+        clubId,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        read: false
       });
     });
 
-    res.status(200).json({ success: true, message: 'Member kicked successfully' });
+    // 10. Real-time Notification via Socket.IO
+    if (global.io) {
+      // Notify the kicked user
+      global.io.to(`user:${memberId}`).emit('notification', {
+        type: 'club_kicked',
+        clubId,
+        message: `You have been removed from ${clubName}.`
+      });
+      // Force real-time UI update for the club members
+      global.io.to(`club:${clubId}`).emit('club:member_kicked', {
+        userId: memberId,
+        clubId
+      });
+    }
+
+    res.status(200).json({ success: true, message: 'Member kicked securely' });
   } catch (error) {
     console.error('Error kicking member:', error.message);
     res.status(400).json({ success: false, error: error.message });
