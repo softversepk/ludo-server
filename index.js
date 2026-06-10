@@ -4937,28 +4937,66 @@ io.on("connection", (socket) => {
             if (neededBots > 0) {
               console.log(`🔒 [SECURITY] Adding ${neededBots} AI bots to tournament room ${roomCode}`);
               
-              const botNames = ['Ahmed_Khan', 'Ali_Raza', 'Hassan_Malik', 'Usman_Sheikh', 'Bilal_Ahmad', 'Hamza_Iqbal', 'Omar_Farooq', 'Zain_Abbas', 'Tariq_Mahmood', 'Kamran_Shah', 'Imran_Siddiqui', 'Faisal_Qureshi', 'Nadeem_Chaudhry', 'Salman_Butt', 'Waqas_Raja', 'Rahul_Sharma', 'Amit_Patel', 'Vikram_Singh', 'Rajesh_Kumar', 'Sanjay_Gupta'];
+              const addBotsSecurely = async () => {
+                try {
+                  let botsList = [];
+                  if (admin.apps.length) {
+                    const botsSnapshot = await admin.firestore().collection('ai_bots').get();
+                    if (!botsSnapshot.empty) {
+                      botsList = botsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    }
+                  }
+                  
+                  // Shuffle the bots from database
+                  botsList = botsList.sort(() => Math.random() - 0.5);
+                  
+                  const fallbackNames = ['Ahmed_Khan', 'Ali_Raza', 'Hassan_Malik', 'Usman_Sheikh', 'Bilal_Ahmad', 'Hamza_Iqbal', 'Omar_Farooq', 'Zain_Abbas', 'Tariq_Mahmood', 'Kamran_Shah', 'Imran_Siddiqui', 'Faisal_Qureshi', 'Nadeem_Chaudhry', 'Salman_Butt', 'Waqas_Raja', 'Rahul_Sharma', 'Amit_Patel', 'Vikram_Singh', 'Rajesh_Kumar', 'Sanjay_Gupta'];
+                  
+                  // Shuffle fallback names to prevent duplicates
+                  const shuffledNames = [...fallbackNames].sort(() => Math.random() - 0.5);
+                  
+                  for(let i = 0; i < neededBots; i++) {
+                    let botData;
+                    if (i < botsList.length) {
+                      const dbBot = botsList[i];
+                      botData = {
+                        uid: dbBot.id || `bot_${Date.now()}_${i}`,
+                        username: dbBot.username || dbBot.name || shuffledNames[i % shuffledNames.length],
+                        avatar: dbBot.avatar || `https://api.dicebear.com/7.x/avataaars/png?seed=${dbBot.username || shuffledNames[i % shuffledNames.length]}`,
+                        level: dbBot.level || Math.floor(Math.random() * 15) + 1,
+                        isBot: true,
+                        country: dbBot.country || (Math.random() > 0.5 ? 'PK' : 'IN'),
+                        ready: true, // Bots are always ready
+                        joinedAt: Date.now(),
+                        socketId: null
+                      };
+                    } else {
+                      const botId = `bot_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+                      const botName = shuffledNames[i % shuffledNames.length];
+                      
+                      botData = {
+                        uid: botId,
+                        username: botName,
+                        avatar: `https://api.dicebear.com/7.x/avataaars/png?seed=${botName}`,
+                        level: Math.floor(Math.random() * 15) + 1,
+                        isBot: true,
+                        country: Math.random() > 0.5 ? 'PK' : 'IN',
+                        ready: true,
+                        joinedAt: Date.now(),
+                        socketId: null
+                      };
+                    }
+                    
+                    currentRoom.players[botData.uid] = botData;
+                  }
+                  
+                  io.to(roomCode).emit("room_update", currentRoom);
+                } catch (error) {
+                  console.error('Error adding secure tournament bots:', error);
+                }
+              };
               
-              for(let i = 0; i < neededBots; i++) {
-                const botId = `bot_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-                const botName = botNames[Math.floor(Math.random() * botNames.length)] + '_' + Math.floor(Math.random() * 100);
-                
-                const botData = {
-                  uid: botId,
-                  username: botName,
-                  avatar: `https://api.dicebear.com/7.x/avataaars/png?seed=${botName}`,
-                  level: Math.floor(Math.random() * 15) + 1,
-                  isBot: true,
-                  country: Math.random() > 0.5 ? 'PK' : 'IN',
-                  ready: false,
-                  joinedAt: Date.now(),
-                  socketId: null
-                };
-                
-                currentRoom.players[botId] = botData;
-              }
-              
-              io.to(roomCode).emit("room_update", currentRoom);
+              addBotsSecurely();
             }
           }
         }, 5000); // 5 seconds wait
