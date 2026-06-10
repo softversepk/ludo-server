@@ -4819,6 +4819,43 @@ io.on("connection", (socket) => {
       if (callback)
         callback({ success: true, roomCode, joined: false, created: true });
       io.to(roomCode).emit("room_update", rooms[roomCode]);
+
+      // Bank-level secure backend logic for Tournament Bots
+      if (playerData.mode === "tournament") {
+        setTimeout(() => {
+          const currentRoom = rooms[roomCode];
+          if (currentRoom && currentRoom.status === "waiting") {
+            const currentCount = Object.keys(currentRoom.players).length;
+            const neededBots = (currentRoom.maxPlayers || 16) - currentCount;
+            if (neededBots > 0) {
+              console.log(`🔒 [SECURITY] Adding ${neededBots} AI bots to tournament room ${roomCode}`);
+              
+              const botNames = ['Ahmed_Khan', 'Ali_Raza', 'Hassan_Malik', 'Usman_Sheikh', 'Bilal_Ahmad', 'Hamza_Iqbal', 'Omar_Farooq', 'Zain_Abbas', 'Tariq_Mahmood', 'Kamran_Shah', 'Imran_Siddiqui', 'Faisal_Qureshi', 'Nadeem_Chaudhry', 'Salman_Butt', 'Waqas_Raja', 'Rahul_Sharma', 'Amit_Patel', 'Vikram_Singh', 'Rajesh_Kumar', 'Sanjay_Gupta'];
+              
+              for(let i = 0; i < neededBots; i++) {
+                const botId = `bot_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+                const botName = botNames[Math.floor(Math.random() * botNames.length)] + '_' + Math.floor(Math.random() * 100);
+                
+                const botData = {
+                  uid: botId,
+                  username: botName,
+                  avatar: `https://api.dicebear.com/7.x/avataaars/png?seed=${botName}`,
+                  level: Math.floor(Math.random() * 15) + 1,
+                  isBot: true,
+                  country: Math.random() > 0.5 ? 'PK' : 'IN',
+                  ready: false,
+                  joinedAt: Date.now(),
+                  socketId: null
+                };
+                
+                currentRoom.players[botId] = botData;
+              }
+              
+              io.to(roomCode).emit("room_update", currentRoom);
+            }
+          }
+        }, 5000); // 5 seconds wait
+      }
     }
   });
 
