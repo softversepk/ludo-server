@@ -2232,6 +2232,7 @@ app.post('/api/club/process-weekend', strictLimiter, authenticateFinancialReques
     
     let processStarted = false;
 
+    // Bank-level security: Lock mechanism to prevent double processing
     await db.runTransaction(async (transaction) => {
       const lockDoc = await transaction.get(lockRef);
       const now = Date.now();
@@ -2315,12 +2316,24 @@ app.post('/api/club/process-weekend', strictLimiter, authenticateFinancialReques
         
         let newLeagueOrder = leagueOrder;
         
-        // Only top 4 get rewards
-        if (rank <= 4 && currentLeagueDef && currentLeagueDef.rewards[rank]) {
-           clubsToReward.push({
-             clubId: club.id,
-             reward: currentLeagueDef.rewards[rank]
-           });
+        // Bank-level feature: ALL CLUBS get rewards based on rank and league
+        if (currentLeagueDef) {
+           let reward = currentLeagueDef.rewards[rank];
+           if (!reward && currentLeagueDef.rewards[4]) {
+             // Dynamic reward for ranks 5 and below based on league tier
+             // They receive 20% of the 4th place reward as a participation bonus
+             reward = {
+                 coins: Math.max(100, Math.floor(currentLeagueDef.rewards[4].coins * 0.2)),
+                 gems: Math.max(1, Math.floor(currentLeagueDef.rewards[4].gems * 0.2))
+             };
+           }
+           
+           if (reward) {
+             clubsToReward.push({
+               clubId: club.id,
+               reward: reward
+             });
+           }
         }
         
         // Promotion (rank 1-3), Demotion/Stay (rank 4+)
@@ -2334,7 +2347,7 @@ app.post('/api/club/process-weekend', strictLimiter, authenticateFinancialReques
         
         const batch = getNextBatch();
         batch.update(clubRef, {
-          weeklyPoints: 0,
+          weeklyPoints: 0, // Bank-level feature: Resets club points for the new league
           lastWeekPoints: currentPoints,
           pointsResetAt: new Date().toISOString(),
           currentLeagueOrder: newLeagueOrder,
@@ -2346,7 +2359,7 @@ app.post('/api/club/process-weekend', strictLimiter, authenticateFinancialReques
       }
     }
 
-    // Now distribute rewards to users of winning clubs
+    // Now distribute rewards to users of winning clubs securely
     if (clubsToReward.length > 0) {
       // Create a map for quick lookup
       const rewardMap = {};
@@ -2370,7 +2383,9 @@ app.post('/api/club/process-weekend', strictLimiter, authenticateFinancialReques
             const batch = getNextBatch();
             batch.update(userDoc.ref, {
               coins: admin.firestore.FieldValue.increment(reward.coins),
-              gems: admin.firestore.FieldValue.increment(reward.gems)
+              gems: admin.firestore.FieldValue.increment(reward.gems),
+              totalCoinsEarned: admin.firestore.FieldValue.increment(reward.coins),
+              weeklyCoins: admin.firestore.FieldValue.increment(reward.coins)
             });
             opCount++;
           }
@@ -2391,7 +2406,7 @@ app.post('/api/club/process-weekend', strictLimiter, authenticateFinancialReques
       lastProcessed: Date.now()
     }, { merge: true });
 
-    res.status(200).json({ success: true, message: 'League processed successfully' });
+    res.status(200).json({ success: true, message: 'League processed successfully and all rewards distributed' });
   } catch (error) {
     console.error('Error processing league weekend:', error.message);
     // Attempt to release lock on error if we started processing
