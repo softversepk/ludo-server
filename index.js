@@ -3463,6 +3463,57 @@ app.post('/api/game/validate-win', strictLimiter, authenticateFinancialRequest, 
   }
 });
 
+const TournamentServer = require('./tournamentServer');
+
+// SECURE TOURNAMENT ENDPOINTS
+
+app.post('/api/tournament/start', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { tournamentId, betAmount, players } = req.body;
+    if (!tournamentId || !betAmount || !players) {
+      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    }
+    
+    const tournament = TournamentServer.createTournament(tournamentId, betAmount, players);
+    res.json({ success: true, tournament });
+  } catch (error) {
+    console.error('Error starting tournament:', error);
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
+app.post('/api/tournament/report-match', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { tournamentId, matchId, winnerId } = req.body;
+    if (!tournamentId || !matchId || !winnerId) {
+      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    }
+
+    const result = await TournamentServer.reportMatchResult(tournamentId, matchId, winnerId);
+    if (result.error) {
+      return res.status(400).json({ success: false, error: result.error });
+    }
+
+    res.json({ success: true, tournament: result.tournament });
+  } catch (error) {
+    console.error('Error reporting match result:', error);
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
+app.get('/api/tournament/:tournamentId', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { tournamentId } = req.params;
+    const tournament = TournamentServer.getTournament(tournamentId);
+    if (!tournament) {
+      return res.status(404).json({ success: false, error: 'Tournament not found' });
+    }
+    res.json({ success: true, tournament });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
 // SECURE TOURNAMENT WIN VALIDATION
 app.post('/api/game/validate-tournament-win', strictLimiter, authenticateFinancialRequest, async (req, res) => {
   try {
