@@ -1376,9 +1376,13 @@ app.post('/api/club/update-settings', strictLimiter, authenticateFinancialReques
 
       const clubData = clubDoc.data();
       
-      // Strict ownership validation
-      if (clubData.ownerId !== userId) {
-        throw new Error('Unauthorized: Only the club owner can update settings');
+      // Strict ownership/role validation
+      const isOwner = clubData.ownerId === userId;
+      // Allow supervisors, mini-admins, and admins to also edit club settings
+      const isPrivileged = clubData.privilegedMembers && clubData.privilegedMembers.includes(userId);
+      
+      if (!isOwner && !isPrivileged) {
+        throw new Error('Unauthorized: Only the club owner, admins, or supervisors can update settings');
       }
 
       transaction.update(clubRef, {
