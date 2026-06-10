@@ -1375,13 +1375,14 @@ app.post('/api/club/update-settings', strictLimiter, authenticateFinancialReques
       if (!clubDoc.exists) throw new Error('Club not found');
 
       const clubData = clubDoc.data();
+      const userData = userDoc.data();
+      const userRole = userData.clubRole;
       
       // Strict ownership/role validation
       const isOwner = clubData.ownerId === userId;
-      // Allow supervisors, mini-admins, and admins to also edit club settings
-      const isPrivileged = clubData.privilegedMembers && clubData.privilegedMembers.includes(userId);
+      const canEdit = isOwner || userRole === 'supervisor' || userRole === 'admin';
       
-      if (!isOwner && !isPrivileged) {
+      if (!canEdit) {
         throw new Error('Unauthorized: Only the club owner, admins, or supervisors can update settings');
       }
 
@@ -1540,7 +1541,7 @@ app.post('/api/club/promote-member', strictLimiter, authenticateFinancialRequest
 
       // Update privileged members in club doc
       const clubUpdates = {};
-      if (newRole === 'supervisor' || newRole === 'admin' || newRole === 'mini-admin') {
+      if (newRole === 'supervisor') {
         clubUpdates.privilegedMembers = admin.firestore.FieldValue.arrayUnion(memberId);
       } else {
         clubUpdates.privilegedMembers = admin.firestore.FieldValue.arrayRemove(memberId);
