@@ -826,7 +826,9 @@ app.get('/api/club/search', strictLimiter, authenticateFinancialRequest, async (
       minLevel: data.minLevel,
       maxMembers: data.maxMembers,
       createdAt: data.createdAt,
-      ownerName: data.ownerName
+      ownerName: data.ownerName,
+      ownerId: data.ownerId,
+      privilegedMembers: data.privilegedMembers || []
     });
     
     if (!searchTerm) {
@@ -1015,7 +1017,11 @@ app.post('/api/club/join', strictLimiter, authenticateFinancialRequest, async (r
       }
 
       // Check if private and verify invite code
-      if (clubData.isPrivate) {
+      const isOwner = clubData.ownerId === userId;
+      const isPrivileged = clubData.privilegedMembers && clubData.privilegedMembers.includes(userId);
+      const canBypassPrivate = isOwner || isPrivileged;
+
+      if (clubData.isPrivate && !canBypassPrivate) {
         if (!inviteCode || (clubData.inviteCode && inviteCode.trim().toUpperCase() !== clubData.inviteCode.toUpperCase())) {
           throw new Error('Invalid invite code for private club');
         }
@@ -1025,9 +1031,16 @@ app.post('/api/club/join', strictLimiter, authenticateFinancialRequest, async (r
         memberCount: admin.firestore.FieldValue.increment(1)
       });
 
+      let assignedRole = 'member';
+      if (isOwner) {
+        assignedRole = 'owner';
+      } else if (isPrivileged) {
+        assignedRole = 'supervisor';
+      }
+
       transaction.update(userRef, {
         clubId: targetClubId,
-        clubRole: 'member',
+        clubRole: assignedRole,
         joinedClubAt: admin.firestore.FieldValue.serverTimestamp() // 4. Audit trail
       });
     });
@@ -1423,7 +1436,8 @@ app.post('/api/club/kick-member', strictLimiter, authenticateFinancialRequest, a
       });
 
       transaction.update(clubRef, {
-        memberCount: admin.firestore.FieldValue.increment(-1)
+        memberCount: admin.firestore.FieldValue.increment(-1),
+        privilegedMembers: admin.firestore.FieldValue.arrayRemove(memberId)
       });
     });
 
@@ -1472,6 +1486,15 @@ app.post('/api/club/promote-member', strictLimiter, authenticateFinancialRequest
       transaction.update(memberRef, {
         clubRole: newRole
       });
+
+      // Update privileged members in club doc
+      const clubUpdates = {};
+      if (newRole === 'supervisor' || newRole === 'admin' || newRole === 'mini-admin') {
+        clubUpdates.privilegedMembers = admin.firestore.FieldValue.arrayUnion(memberId);
+      } else {
+        clubUpdates.privilegedMembers = admin.firestore.FieldValue.arrayRemove(memberId);
+      }
+      transaction.update(clubRef, clubUpdates);
 
       // Send notification if role changed
       if (oldRole !== newRole) {
