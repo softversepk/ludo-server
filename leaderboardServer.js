@@ -12,12 +12,6 @@ class LeaderboardServer {
     this.subscribedUsers = new Map(); // socketId -> { userId, subscriptions }
     this.updateInterval = null;
     this.fetchInterval = null;
-    this.leagueConfig = {
-      type: 'day_to_day',
-      startDay: 1, // 1 = Monday
-      durationDays: 7,
-      lastResetAt: null
-    };
     this.isFetching = false;
   }
 
@@ -36,17 +30,6 @@ class LeaderboardServer {
       }
       
       const db = admin.firestore();
-      
-      // Fetch League Config
-      try {
-        const configDoc = await db.collection('systemSettings').doc('leagueConfig').get();
-        if (configDoc.exists) {
-          this.leagueConfig = { ...this.leagueConfig, ...configDoc.data() };
-          console.log('⚙️ [LEAGUE CONFIG SECURE] Updated from Firebase:', this.leagueConfig);
-        }
-      } catch (err) {
-        console.error('❌ [LEAGUE CONFIG SECURE] Error fetching config:', err);
-      }
       
       // Fetch top 100 players by weeklyProfitCoins
       const playersSnapshot = await db.collection('users')
@@ -144,39 +127,6 @@ class LeaderboardServer {
 
     // Start periodic leaderboard recalculation and fetching
     this.startLeaderboardUpdates();
-  }
-
-  /**
-   * Get next reset time based on Firebase configuration
-   */
-  getNextResetTime() {
-    const now = new Date();
-    
-    if (this.leagueConfig.type === 'days' && this.leagueConfig.lastResetAt) {
-      const start = new Date(this.leagueConfig.lastResetAt);
-      const cycleDuration = (this.leagueConfig.durationDays || 7) * 24 * 60 * 60 * 1000;
-      const timeSinceStart = now.getTime() - start.getTime();
-      const cyclesPassed = Math.floor(timeSinceStart / cycleDuration);
-      
-      const currentStart = new Date(start.getTime() + cyclesPassed * cycleDuration);
-      return new Date(currentStart.getTime() + cycleDuration);
-    }
-
-    // Default: Day to Day (e.g., Monday to Monday)
-    const startDay = this.leagueConfig.startDay !== undefined ? this.leagueConfig.startDay : 1;
-    const currentDay = now.getDay();
-    
-    const daysToSubtract = currentDay === startDay ? 0 : 
-      (currentDay < startDay ? 7 - startDay + currentDay : currentDay - startDay);
-    
-    const weekStart = new Date(now);
-    weekStart.setDate(weekStart.getDate() - daysToSubtract);
-    weekStart.setHours(0, 0, 0, 0);
-
-    const nextReset = new Date(weekStart);
-    nextReset.setDate(nextReset.getDate() + 7);
-    
-    return nextReset;
   }
 
   /**
@@ -456,9 +406,13 @@ class LeaderboardServer {
       });
 
       const now = new Date();
-      const nextReset = this.getNextResetTime();
+      const nextMonday = new Date(now);
+      const currentDay = nextMonday.getDay();
+      const daysUntilMonday = currentDay === 0 ? 1 : 8 - currentDay;
+      nextMonday.setDate(nextMonday.getDate() + daysUntilMonday);
+      nextMonday.setHours(0, 0, 0, 0);
 
-      const timeRemaining = nextReset.getTime() - now.getTime();
+      const timeRemaining = nextMonday.getTime() - now.getTime();
       const days = Math.floor(timeRemaining / (1000 * 60 * 60 * 24));
       const hours = Math.floor((timeRemaining % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
       const minutes = Math.floor((timeRemaining % (1000 * 60 * 60)) / (1000 * 60));
@@ -643,9 +597,13 @@ class LeaderboardServer {
       const activeLeagues = new Set(Array.from(this.subscribedUsers.values()).map(sub => sub.leagueOrder).filter(Boolean));
       
       const now = new Date();
-      const nextReset = this.getNextResetTime();
+      const nextMonday = new Date(now);
+      const currentDay = nextMonday.getDay();
+      const daysUntilMonday = currentDay === 0 ? 1 : 8 - currentDay;
+      nextMonday.setDate(nextMonday.getDate() + daysUntilMonday);
+      nextMonday.setHours(0, 0, 0, 0);
 
-      const timeRemaining = nextReset.getTime() - now.getTime();
+      const timeRemaining = nextMonday.getTime() - now.getTime();
       const days = Math.floor(timeRemaining / (1000 * 60 * 60 * 24));
       const hours = Math.floor((timeRemaining % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
       const minutes = Math.floor((timeRemaining % (1000 * 60 * 60)) / (1000 * 60));
