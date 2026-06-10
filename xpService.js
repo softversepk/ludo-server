@@ -47,60 +47,65 @@ async function processUserXP(userId, action) {
       default: return { success: false, message: 'Invalid action.' };
     }
 
-    // 2. Fetch User Data
+    // 2 & 3 & 4. Process XP in a Transaction to prevent Race Conditions
     const userRef = db.collection('users').doc(userId);
-    const userDoc = await userRef.get();
     
-    if (!userDoc.exists) {
-      return { success: false, message: 'User not found.' };
-    }
-    
-    const userData = userDoc.data();
-    let currentLevel = userData.level || 1;
-    let currentXp = userData.xp || 0;
-    let totalXp = userData.totalXp || 0;
-    
-    // 3. Add XP and calculate level ups
-    currentXp += xpToAdd;
-    totalXp += xpToAdd;
-    
-    let leveledUp = false;
-    let requiredXpForNextLevel = Math.floor(settings.baseXpFormula * Math.pow(currentLevel, settings.levelMultiplier));
-    
-    // XP Reset / Consume Logic
-    while (currentXp >= requiredXpForNextLevel) {
-      currentXp -= requiredXpForNextLevel; // Consume the required XP
-      currentLevel += 1;
-      leveledUp = true;
-      requiredXpForNextLevel = Math.floor(settings.baseXpFormula * Math.pow(currentLevel, settings.levelMultiplier));
-    }
-    
-    // 4. Update Database
-    await userRef.update({
-      level: currentLevel,
-      xp: currentXp,
-      totalXp: totalXp,
-      lastXpUpdate: admin.firestore.FieldValue.serverTimestamp()
+    const result = await db.runTransaction(async (transaction) => {
+      const userDoc = await transaction.get(userRef);
+      
+      if (!userDoc.exists) {
+        throw new Error('User not found.');
+      }
+      
+      const userData = userDoc.data();
+      let currentLevel = userData.level || 1;
+      let currentXp = userData.xp || 0;
+      let totalXp = userData.totalXp || 0;
+      
+      // Add XP and calculate level ups
+      currentXp += xpToAdd;
+      totalXp += xpToAdd;
+      
+      let leveledUp = false;
+      let requiredXpForNextLevel = Math.floor(settings.baseXpFormula * Math.pow(currentLevel, settings.levelMultiplier));
+      
+      // XP Reset / Consume Logic
+      while (currentXp >= requiredXpForNextLevel) {
+        currentXp -= requiredXpForNextLevel; // Consume the required XP
+        currentLevel += 1;
+        leveledUp = true;
+        requiredXpForNextLevel = Math.floor(settings.baseXpFormula * Math.pow(currentLevel, settings.levelMultiplier));
+      }
+      
+      // Update Database
+      transaction.update(userRef, {
+        level: currentLevel,
+        xp: currentXp,
+        totalXp: totalXp,
+        lastXpUpdate: admin.firestore.FieldValue.serverTimestamp()
+      });
+
+      return {
+        success: true,
+        xpAdded,
+        newLevel: currentLevel,
+        newXp: currentXp,
+        leveledUp,
+        requiredXpForNextLevel
+      };
     });
     
-    // 5. Log Activity (Optional but recommended)
+    // 5. Log Activity outside the transaction
     await db.collection('xp_logs').add({
       userId,
       action,
       xpAdded: xpToAdd,
-      newLevel: currentLevel,
-      newXp: currentXp,
+      newLevel: result.newLevel,
+      newXp: result.newXp,
       timestamp: admin.firestore.FieldValue.serverTimestamp()
     });
     
-    return {
-      success: true,
-      xpAdded,
-      newLevel: currentLevel,
-      newXp: currentXp,
-      leveledUp,
-      requiredXpForNextLevel
-    };
+    return result;
 
   } catch (error) {
     console.error('Error processing XP:', error);
