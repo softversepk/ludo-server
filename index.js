@@ -2519,6 +2519,147 @@ app.post('/api/club/reset-all-points', strictLimiter, authenticateFinancialReque
   }
 });
 
+// PLAYER LEADERBOARD LEAGUE PROCESS
+app.post('/api/leaderboard/process-weekend', strictLimiter, authenticateFinancialRequest, async (req, res) => {
+  try {
+    const { leagueId } = req.body;
+    const db = admin.firestore();
+
+    const lockRef = db.collection('system').doc('player_league_processing');
+    let processStarted = false;
+
+    // Bank-level security: Lock mechanism to prevent double processing
+    await db.runTransaction(async (transaction) => {
+      const lockDoc = await transaction.get(lockRef);
+      const now = Date.now();
+
+      if (lockDoc.exists) {
+        const lockData = lockDoc.data();
+        if (lockData.isProcessing && (now - lockData.timestamp < 2 * 60 * 1000)) {
+          throw new Error('Already processing');
+        }
+        
+        if (leagueId && lockData.lastProcessedLeagueId === leagueId) {
+          throw new Error('Already processed this cycle');
+        }
+      }
+
+      transaction.set(lockRef, {
+        isProcessing: true,
+        timestamp: now,
+        lastProcessedLeagueId: leagueId || null
+      }, { merge: true });
+
+      processStarted = true;
+    });
+
+    if (!processStarted) {
+      return res.status(200).json({ success: false, message: 'Skipped processing' });
+    }
+
+    // Process the rewards securely on the backend
+    const playersQuery = db.collection('users').orderBy('weeklyProfitCoins', 'desc');
+    const snapshot = await playersQuery.get();
+    
+    const allPlayers = snapshot.docs.map((doc, index) => ({
+      id: doc.id,
+      ref: doc.ref,
+      ...doc.data(),
+      rank: index + 1
+    }));
+
+    // Get all players with coins (not just top 50)
+    const topPlayers = allPlayers.filter(player => (player.weeklyProfitCoins || 0) > 0);
+
+    if (topPlayers.length === 0) {
+      // Release lock
+      await lockRef.set({
+        isProcessing: false,
+        lastProcessedLeagueId: leagueId || null,
+        lastProcessed: Date.now()
+      }, { merge: true });
+
+      return res.status(200).json({ success: true, rewardedCount: 0 });
+    }
+
+    // Define rewards
+    const rewards = {
+      1: { diamonds: 100, coins: 100000 }, // 1st place
+      2: { diamonds: 50, coins: 50000 },   // 2nd place
+      3: { diamonds: 30, coins: 30000 },   // 3rd place
+      default: { diamonds: 10, coins: 5000 } // 4th place and below
+    };
+
+    const batches = [];
+    let currentBatch = db.batch();
+    let opCount = 0;
+
+    const getNextBatch = () => {
+      if (opCount >= 400) {
+        batches.push(currentBatch);
+        currentBatch = db.batch();
+        opCount = 0;
+      }
+      return currentBatch;
+    };
+
+    topPlayers.forEach(player => {
+      const reward = rewards[player.rank] || rewards.default;
+      
+      const batch = getNextBatch();
+      
+      // Update user's diamonds and coins, and reset weeklyProfitCoins securely
+      batch.update(player.ref, {
+        gems: admin.firestore.FieldValue.increment(reward.diamonds),
+        coins: admin.firestore.FieldValue.increment(reward.coins),
+        totalCoinsEarned: admin.firestore.FieldValue.increment(reward.coins),
+        weeklyCoins: admin.firestore.FieldValue.increment(reward.coins),
+        weeklyProfitCoins: 0 // Reset for new league
+      });
+      opCount++;
+
+      // Create notification
+      const notifRef = db.collection('notifications').doc();
+      batch.set(notifRef, {
+        userId: player.id,
+        type: 'league_reward',
+        title: `League Reward - Rank #${player.rank}`,
+        message: `You earned ${reward.diamonds} diamonds and ${reward.coins.toLocaleString()} coins!`,
+        diamonds: reward.diamonds,
+        coins: reward.coins,
+        rank: player.rank,
+        leagueId: leagueId || null,
+        read: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      opCount++;
+    });
+
+    if (opCount > 0) batches.push(currentBatch);
+    
+    for (const batch of batches) {
+      await batch.commit();
+    }
+
+    // Release lock
+    await lockRef.set({
+      isProcessing: false,
+      lastProcessedLeagueId: leagueId || null,
+      lastProcessed: Date.now()
+    }, { merge: true });
+
+    res.status(200).json({ success: true, rewardedCount: topPlayers.length, message: 'League processed successfully and all rewards distributed' });
+  } catch (error) {
+    console.error('Error processing leaderboard league weekend:', error.message);
+    // Attempt to release lock on error if we started processing
+    try {
+      const lockRef = admin.firestore().collection('system').doc('player_league_processing');
+      await lockRef.update({ isProcessing: false });
+    } catch (e) { /* ignore */ }
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
 // SECURE FINANCIAL VALIDATION ENDPOINTS
 // Authentication middleware for financial operations
 async function authenticateFinancialRequest(req, res, next) {
