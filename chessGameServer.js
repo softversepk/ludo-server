@@ -521,30 +521,76 @@ class ChessGameServer {
 
     // Initialize game state if this is the first move/sync
     if (!game.gameState) {
-      game.gameState = gameState;
+      // Create initial state purely on the server to prevent initial state hacking
+      const { initializeChessGame } = require('./utils/chessLogic');
+      game.gameState = initializeChessGame();
       console.log(`♟️ [CHESS] Game state initialized for ${roomId}`);
-    } else {
-      // Update game state with new move
-      game.gameState = gameState;
     }
     
+    // Validate move and apply on server
+    const lastMove = gameState.lastMove;
+    if (!lastMove || !lastMove.from || !lastMove.to) {
+      console.warn(`[CHESS] Security Alert: Invalid move format in room ${roomId}`);
+      if (callback) callback({ error: 'Invalid move data' });
+      return;
+    }
+
+    const { getLegalMoves, movePiece, isCheckmate } = require('./utils/chessLogic');
+    const piece = game.gameState.pieces.find(p => p.position === lastMove.from);
+
+    // Verify it's the correct piece and turn
+    if (!piece || piece.color !== game.gameState.currentTurn) {
+      console.warn(`[CHESS] Security Alert: Invalid piece or not player's turn in room ${roomId}`);
+      if (callback) callback({ error: 'Invalid piece or not your turn' });
+      return;
+    }
+
+    // Verify the socket corresponds to the current turn's player
+    const playerColor = socket.id === whiteSocketId ? 'white' : (socket.id === blackSocketId ? 'black' : null);
+    if (playerColor !== game.gameState.currentTurn) {
+      console.warn(`[CHESS] Security Alert: Player ${playerColor} attempted to move on ${game.gameState.currentTurn}'s turn`);
+      if (callback) callback({ error: 'Not your turn' });
+      return;
+    }
+
+    // Verify the move is legal
+    const legalMoves = getLegalMoves(piece, game.gameState.pieces);
+    if (!legalMoves.includes(lastMove.to)) {
+      console.warn(`[CHESS] Security Alert: Illegal move ${lastMove.from} -> ${lastMove.to} in room ${roomId}`);
+      if (callback) callback({ error: 'Illegal move' });
+      return;
+    }
+
+    // Apply move to generate new state securely on the server
+    const newState = movePiece(game.gameState, lastMove.from, lastMove.to);
+    
+    // Check for checkmate
+    if (isCheckmate(newState.pieces, newState.currentTurn)) {
+      newState.isCheckmate = true;
+    }
+
+    game.gameState = newState;
     game.lastUpdate = Date.now();
 
-    // Broadcast to both players
-    // We must ensure the socket explicitly broadcasts to the room using `socket.to(roomId).emit` 
-    // or `this.io.to(roomId).emit`, since `this.io.to(roomId)` works for sending it to everyone.
+    // Broadcast the SERVER-GENERATED state to both players
     socket.to(roomId).emit('chess:gameUpdate', {
-      gameState,
+      gameState: game.gameState,
       timestamp: Date.now()
     });
 
-    console.log(`♟️ [CHESS] Move in ${roomId}: ${gameState.lastMove?.from} -> ${gameState.lastMove?.to}`);
+    // Also emit back to the sender so their state stays strictly in sync with the server
+    socket.emit('chess:gameUpdate', {
+      gameState: game.gameState,
+      timestamp: Date.now()
+    });
 
-    if (callback) callback({ success: true });
+    console.log(`♟️ [CHESS] Validated move in ${roomId}: ${lastMove.from} -> ${lastMove.to}`);
 
-    // Check for checkmate
-    if (gameState.isCheckmate) {
-      this.handleGameEnd(roomId, gameState);
+    if (callback) callback({ success: true, gameState: game.gameState });
+
+    // Check for checkmate and end game if necessary
+    if (game.gameState.isCheckmate) {
+      this.handleGameEnd(roomId, game.gameState);
     }
   }
 
