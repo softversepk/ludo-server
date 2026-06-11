@@ -87,10 +87,9 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Production CORS configuration with security
 const corsOptions = {
-  origin: ["http://localhost:8081", "http://localhost:8082", "http://10.0.2.2:8081", "https://web-production-ec139.up.railway.app", "*"], // Allow local development ports and production
-  methods: ["GET", "POST", "OPTIONS"],
+  origin: "*", // Allow all origins for easier connection during development and testing
+  methods: ["GET", "POST"],
   credentials: true,
-  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept"],
   optionsSuccessStatus: 200 // For legacy browser support
 };
 
