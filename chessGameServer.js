@@ -456,7 +456,7 @@ class ChessGameServer {
         } : {
           uid: 'ai_bot',
           username: aiName,
-          avatar: 'https://via.placeholder.com/100?text=AI',
+          avatar: 'https://ui-avatars.com/api/?name=AI&background=2a2a3e&color=fff',
           level: level + 2,
           socketId: null,
           isAI: true
@@ -471,7 +471,7 @@ class ChessGameServer {
         } : {
           uid: 'ai_bot',
           username: aiName,
-          avatar: 'https://via.placeholder.com/100?text=AI',
+          avatar: 'https://ui-avatars.com/api/?name=AI&background=2a2a3e&color=fff',
           level: level + 2,
           socketId: null,
           isAI: true
@@ -527,11 +527,12 @@ class ChessGameServer {
       console.log(`♟️ [CHESS] Game state initialized for ${roomId}`);
     }
     
-    // Validate move and apply on server
+    // If there is no lastMove, this is just an initial state sync request from the client
     const lastMove = gameState.lastMove;
     if (!lastMove || !lastMove.from || !lastMove.to) {
-      console.warn(`[CHESS] Security Alert: Invalid move format in room ${roomId}`);
-      if (callback) callback({ error: 'Invalid move data' });
+      console.log(`♟️ [CHESS] State sync request received for room ${roomId}`);
+      // Just send them the current server state
+      if (callback) callback({ success: true, gameState: game.gameState });
       return;
     }
 
