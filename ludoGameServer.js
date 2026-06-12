@@ -359,7 +359,11 @@ class LudoGameServer {
         if (!room.gameState.accumulatedDice) {
           room.gameState.accumulatedDice = [];
         }
+        if (!room.gameState.turnDiceValues) {
+          room.gameState.turnDiceValues = [];
+        }
         room.gameState.accumulatedDice.push(diceValue);
+        room.gameState.turnDiceValues.push(diceValue);
 
         if (!room.gameState.lastDiceValues) {
           room.gameState.lastDiceValues = {};
@@ -387,6 +391,7 @@ class LudoGameServer {
               playerColor: currentColor,
               diceValue,
               accumulatedDice: room.gameState.accumulatedDice,
+              turnDiceValues: room.gameState.turnDiceValues,
               validMoves: [],
               status: GAME_STATE.ROLLING,
               timestamp: Date.now()
@@ -414,6 +419,7 @@ class LudoGameServer {
             playerColor: currentColor,
             diceValue: room.gameState.diceValue, // The dice currently being processed
             accumulatedDice: room.gameState.accumulatedDice,
+            turnDiceValues: room.gameState.turnDiceValues,
             validMoves: room.gameState.validMoves,
             status: GAME_STATE.MOVING,
             timestamp: Date.now()
@@ -428,6 +434,7 @@ class LudoGameServer {
             playerColor: currentColor,
             diceValue,
             accumulatedDice: room.gameState.accumulatedDice,
+            turnDiceValues: room.gameState.turnDiceValues,
             validMoves: [],
             status: GAME_STATE.ROLLING,
             timestamp: Date.now()
@@ -540,7 +547,11 @@ class LudoGameServer {
       if (!room.gameState.accumulatedDice) {
         room.gameState.accumulatedDice = [];
       }
+      if (!room.gameState.turnDiceValues) {
+        room.gameState.turnDiceValues = [];
+      }
       room.gameState.accumulatedDice.push(diceValue);
+      room.gameState.turnDiceValues.push(diceValue);
 
       // Store last dice value for this player
       if (!room.gameState.lastDiceValues) {
@@ -574,6 +585,7 @@ class LudoGameServer {
         playerColor: player.color,
         diceValue,
         accumulatedDice: room.gameState.accumulatedDice,
+        turnDiceValues: room.gameState.turnDiceValues,
         validMoves: room.gameState.validMoves.length > 0 ? room.gameState.validMoves : [],
         status: room.gameState.status,
         timestamp: Date.now()
@@ -671,6 +683,9 @@ class LudoGameServer {
       if (!room.gameState.accumulatedDice) room.gameState.accumulatedDice = [];
       room.gameState.accumulatedDice.unshift(diceValue); // Add it to the front so it gets processed next
 
+      if (!room.gameState.turnDiceValues) room.gameState.turnDiceValues = [];
+      room.gameState.turnDiceValues.unshift(diceValue);
+
       // Count consecutive sixes securely in backend
       const consecutiveSixesCount = room.gameState.accumulatedDice.filter(d => d === 6).length;
 
@@ -697,6 +712,7 @@ class LudoGameServer {
         playerColor: player.color,
         diceValue,
         accumulatedDice: room.gameState.accumulatedDice,
+        turnDiceValues: room.gameState.turnDiceValues,
         validMoves: room.gameState.validMoves.length > 0 ? room.gameState.validMoves : [],
         status: room.gameState.status,
         timestamp: Date.now(),
@@ -1234,6 +1250,7 @@ class LudoGameServer {
    */
   skipTurn(room, currentColor, diceValue) {
     room.gameState.accumulatedDice = []; // Clear accumulated dice
+    room.gameState.turnDiceValues = []; // Clear turn dice values
     // Don't skip if rolled 6
     if (diceValue !== 6) {
       this.nextTurn(room);
@@ -1468,6 +1485,7 @@ class LudoGameServer {
       turnOrder: room.gameState.turnOrder,
       diceValue: room.gameState.diceValue,
       accumulatedDice: room.gameState.accumulatedDice || [],
+      turnDiceValues: room.gameState.turnDiceValues || [],
       lastDiceValues: room.gameState.lastDiceValues,
       validMoves: room.gameState.validMoves,
       players: room.gameState.players,
