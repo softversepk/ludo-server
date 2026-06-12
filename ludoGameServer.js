@@ -356,50 +356,82 @@ class LudoGameServer {
         room.gameState.diceValue = diceValue;
         room.gameState.lastDiceRoll = Date.now();
 
+        if (!room.gameState.accumulatedDice) {
+          room.gameState.accumulatedDice = [];
+        }
+        room.gameState.accumulatedDice.push(diceValue);
+
         if (!room.gameState.lastDiceValues) {
           room.gameState.lastDiceValues = {};
         }
         room.gameState.lastDiceValues[currentColor] = diceValue;
 
-        // Calculate valid moves
+        // Count consecutive sixes securely in backend
+        const consecutiveSixesCount = room.gameState.accumulatedDice.filter(d => d === 6).length;
+
+        if (diceValue === 6) {
+          if (consecutiveSixesCount >= 3) {
+            // 3 consecutive sixes: turn is cancelled
+            console.log(`🚫 [RULE] BOT ${currentColor} rolled 3 consecutive sixes. Turn cancelled.`);
+            room.gameState.accumulatedDice = [];
+            room.gameState.validMoves = [];
+            this.nextTurn(room);
+            return;
+          } else {
+            // Allow another roll, keep status ROLLING
+            room.gameState.status = GAME_STATE.ROLLING;
+            room.gameState.validMoves = [];
+            
+            this.broadcastDeltaUpdate(roomId, {
+              type: 'dice_roll',
+              playerColor: currentColor,
+              diceValue,
+              accumulatedDice: room.gameState.accumulatedDice,
+              validMoves: [],
+              status: GAME_STATE.ROLLING,
+              timestamp: Date.now()
+            });
+
+            // Trigger bot to roll again after a short delay
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            this.playBotTurn(roomId);
+            return;
+          }
+        }
+
+        // Calculate valid moves with the FIRST accumulated dice
         const assistingPlayerColor = this.getAssistingPlayer(room, currentColor);
         const targetColor = assistingPlayerColor || currentColor;
 
-        const validMoves = this.calculateValidMoves(
-          room,
-          room.gameState.players[targetColor].tokens,
-          diceValue,
-          targetColor
-        );
+        // We use the accumulated dice logic for moving
+        this.processNextAccumulatedDice(room, currentColor);
 
-        if (validMoves.length > 0) {
-          room.gameState.status = GAME_STATE.MOVING;
-          room.gameState.validMoves = validMoves;
-          
+        // We don't need to manually calculate validMoves here anymore since processNextAccumulatedDice handles it
+        // but we need to broadcast the result if processNextAccumulatedDice changed state
+        if (room.gameState.status === GAME_STATE.MOVING && room.gameState.validMoves.length > 0) {
           this.broadcastDeltaUpdate(roomId, {
             type: 'dice_roll',
             playerColor: currentColor,
-            diceValue,
-            validMoves,
+            diceValue: room.gameState.diceValue, // The dice currently being processed
+            accumulatedDice: room.gameState.accumulatedDice,
+            validMoves: room.gameState.validMoves,
             status: GAME_STATE.MOVING,
             timestamp: Date.now()
           });
 
           // Trigger the moving part of the bot's turn
           this.playBotTurn(roomId);
-        } else {
-          // No valid moves, skip turn
-          this.broadcastDeltaUpdate(roomId, {
+        } else if (room.gameState.status === GAME_STATE.ROLLING) {
+           // If processNextAccumulatedDice moved turn to next player or gave bonus roll
+           this.broadcastDeltaUpdate(roomId, {
             type: 'dice_roll',
             playerColor: currentColor,
             diceValue,
+            accumulatedDice: room.gameState.accumulatedDice,
             validMoves: [],
             status: GAME_STATE.ROLLING,
             timestamp: Date.now()
           });
-
-          await new Promise(resolve => setTimeout(resolve, 1000)); // Show dice result briefly
-          this.skipTurn(room, currentColor, diceValue);
         }
       } 
       // 2. MOVING STATE
