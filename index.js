@@ -5486,40 +5486,76 @@ io.on("connection", (socket) => {
   });
 
   // SECURE LUDO AI MOVE
+  // 🔒 SECURE LUDO AI MOVE ENDPOINT (Bank-Level Security)
   socket.on("get_ai_move", ({ roomCode, gameState, difficulty, gameMode, targetPlayerForAI }, callback) => {
     try {
+      // 🛡️ SECURITY VALIDATION
+      if (!roomCode || !gameState || !targetPlayerForAI) {
+        logSecurityEvent('INVALID_AI_MOVE_REQUEST', socket.id, { roomCode, targetPlayerForAI });
+        if (callback) callback({ success: false, error: 'Invalid request parameters' });
+        return;
+      }
+
+      // Validate difficulty level
+      const validDifficulties = ['easy', 'medium', 'hard'];
+      const sanitizedDifficulty = validDifficulties.includes(difficulty) ? difficulty : 'medium';
+
+      // Validate game mode
+      const validGameModes = ['classic', 'arrow', 'quick_arrow', 'teamup'];
+      const sanitizedGameMode = validGameModes.includes(gameMode) ? gameMode : 'classic';
+
+      // 🎲 SECURE DICE ROLL - Generated on server, never from client
       const diceValue = Math.floor(Math.random() * 6) + 1;
       const { getAIMove } = require('./utils/aiPlayer');
       
       const allPlayers = gameState.players;
       let tokenIndex = null;
       
-      if (allPlayers && allPlayers[targetPlayerForAI]) {
-        tokenIndex = getAIMove(
-          allPlayers[targetPlayerForAI].tokens,
-          diceValue,
-          targetPlayerForAI,
-          allPlayers,
-          difficulty,
-          gameMode
-        );
+      // Validate player exists
+      if (!allPlayers || !allPlayers[targetPlayerForAI]) {
+        logSecurityEvent('INVALID_PLAYER_AI_MOVE', socket.id, { targetPlayerForAI });
+        if (callback) callback({ success: false, error: 'Invalid player' });
+        return;
       }
 
-      // SECURITY: Store the generated move on the server to prevent hacked clients from altering it
+      // Calculate AI move on server (prevents client manipulation)
+      tokenIndex = getAIMove(
+        allPlayers[targetPlayerForAI].tokens,
+        diceValue,
+        targetPlayerForAI,
+        allPlayers,
+        sanitizedDifficulty,
+        sanitizedGameMode
+      );
+
+      // 🔐 SECURITY: Store the generated move on the server to prevent hacked clients from altering it
       const room = rooms[roomCode];
       if (room) {
         room.expectedBotMove = {
           playerColor: targetPlayerForAI,
           diceValue,
           tokenIndex,
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          socketId: socket.id
         };
+
+        // Log AI move for audit trail
+        console.log(`🤖 [AI-SECURE] Room ${roomCode}: ${targetPlayerForAI} rolled ${diceValue}, token ${tokenIndex}`);
       }
       
-      if (callback) callback({ success: true, diceValue, tokenIndex });
+      // Return secured AI move
+      if (callback) callback({ 
+        success: true, 
+        diceValue, 
+        tokenIndex,
+        difficulty: sanitizedDifficulty,
+        timestamp: Date.now()
+      });
+
     } catch (err) {
-      console.error('Error generating AI move on server:', err);
-      if (callback) callback({ success: false, error: err.message });
+      console.error('🔒 [AI-ERROR] Error generating AI move on server:', err);
+      logSecurityEvent('AI_MOVE_ERROR', socket.id, { error: err.message });
+      if (callback) callback({ success: false, error: 'AI move generation failed' });
     }
   });
 
