@@ -2854,7 +2854,27 @@ app.post('/api/game/undo-roll', strictLimiter, authenticateFinancialRequest, asy
       transaction.update(userRef, { gems: newGems });
       
       // Generate secure random dice roll on backend
-      generatedDiceValue = Math.floor(Math.random() * 6) + 1;
+    const crypto = require('crypto');
+    generatedDiceValue = crypto.randomInt(1, 7);
+    
+    // SECURITY: Set expectedDiceRoll on the room so the socket sync will accept it
+    const room = rooms[actualRoomId];
+    if (room && room.players) {
+      let playerColor = null;
+      for (const [color, player] of Object.entries(room.players)) {
+        if (player.uid === userId) {
+          playerColor = color;
+          break;
+        }
+      }
+      if (playerColor) {
+        room.expectedDiceRoll = {
+          playerColor: playerColor,
+          diceValue: generatedDiceValue,
+          timestamp: Date.now()
+        };
+      }
+    }
     });
 
     // Increment count after successful transaction
@@ -5106,6 +5126,15 @@ io.on("connection", (socket) => {
   socket.on("update_game_state", ({ roomCode, gameState }, callback) => {
     const room = rooms[roomCode];
     if (room) {
+      // SECURITY: Ignore stale state updates
+      if (room.gameState && room.gameState._timestamp && gameState._timestamp) {
+        if (gameState._timestamp < room.gameState._timestamp) {
+          // This is an older state update than what we already have. Ignore it.
+          if (callback) callback({ success: true, warning: "Ignored stale state update" });
+          return;
+        }
+      }
+
       // SECURITY: Block unauthorized state updates
       const senderId = Object.keys(userSockets).find(key => userSockets[key] === socket.id);
       
@@ -5160,7 +5189,16 @@ io.on("connection", (socket) => {
         
         // If the dice value changed or a new roll happened
         if (newDice && newDice !== oldDice) {
-          if (room.expectedDiceRoll && room.expectedDiceRoll.playerColor === currentPlayer) {
+          // Prevent stale updates from other clients triggering security alerts
+          const playerUid = room.players && room.players[currentPlayer] && room.players[currentPlayer].uid;
+          const isBot = room.players && room.players[currentPlayer] && room.players[currentPlayer].isBot;
+          
+          if (!isBot && playerUid && senderId !== playerUid) {
+            console.warn(`[SECURITY] Ignored stale or unauthorized dice update from ${senderId} for player ${playerUid} in room ${roomCode}`);
+            // Don't block the whole state update if it's just a stale dice value from another player,
+            // but DO NOT revert the server's dice value.
+            gameState.lastDiceValues[currentPlayer] = oldDice;
+          } else if (room.expectedDiceRoll && room.expectedDiceRoll.playerColor === currentPlayer) {
             const expected = room.expectedDiceRoll;
             // Check if it's a recent roll (within last 30 seconds to account for slow networks)
             if (Date.now() - expected.timestamp < 30000) {
