@@ -5378,6 +5378,111 @@ io.on("connection", (socket) => {
       }
       // --- END LUDO TEAMUP SECURE WIN VALIDATION ---
 
+      // --- BANK LEVEL SECURE MOVE VALIDATION & STEP-BY-STEP PATH GENERATION ---
+      const isLudoGame = !room.mode || room.mode === 'classic' || room.mode === 'quick' || room.mode === 'arrow' || room.mode === 'quick_arrow';
+      if (isLudoGame && gameState && gameState.players && room.gameState && room.gameState.players && !alreadyOver) {
+        const gameLogic = require('./utils/gameLogic');
+        let isValidMove = true;
+        let moveAnimation = null;
+
+        // Find which token moved
+        for (const color of Object.keys(gameState.players)) {
+          const newTokens = gameState.players[color].tokens;
+          const oldTokens = room.gameState.players[color]?.tokens;
+          if (newTokens && oldTokens) {
+            for (let i = 0; i < 4; i++) {
+              const newPos = newTokens[i].position;
+              const oldPos = oldTokens[i].position;
+              
+              if (newPos !== oldPos) {
+                // A token moved.
+                // Was it a kill? If newPos === -1 and oldPos !== -1, it's a kill, which is a side effect.
+                if (newPos === -1 && oldPos !== -1) {
+                   continue; // Kills are validated by the forward move
+                }
+
+                // If it moved forward, validate the path
+                const diceValue = room.gameState.diceValue;
+                if (!diceValue) {
+                   console.warn(`[SECURITY] Hacked move! No dice value available for room ${roomCode}`);
+                   isValidMove = false;
+                   break;
+                }
+
+                // Calculate expected path step-by-step
+                let currentPosData = { position: oldPos, stepsFromStart: oldTokens[i].stepsFromStart || 0 };
+                const expectedPath = [];
+                
+                // If coming out of home
+                if (oldPos === -1) {
+                   if (diceValue !== 6) {
+                      console.warn(`[SECURITY] Hacked move! Tried to leave home without a 6 in room ${roomCode}`);
+                      isValidMove = false;
+                      break;
+                   }
+                   currentPosData = gameLogic.calculateNewPosition(-1, 6, color, 0, room.gameMode || 'classic', gameState.players[color].hasKilled || false);
+                   expectedPath.push(currentPosData.position);
+                } else {
+                   // Step by step
+                   for (let step = 1; step <= diceValue; step++) {
+                      currentPosData = gameLogic.calculateNewPosition(
+                        currentPosData.position, 
+                        1, 
+                        color, 
+                        currentPosData.stepsFromStart, 
+                        room.gameMode || 'classic', 
+                        gameState.players[color].hasKilled || false
+                      );
+                      expectedPath.push(currentPosData.position);
+                   }
+                }
+
+                let finalExpectedPos = typeof currentPosData === 'object' ? currentPosData.position : currentPosData;
+                
+                // Handle Arrow mode jumps
+                const isArrowMode = room.gameMode === 'arrow' || room.gameMode === 'quick_arrow';
+                const tailPositions = [4, 17, 30, 43];
+                if (isArrowMode && tailPositions.includes(finalExpectedPos)) {
+                   currentPosData = gameLogic.calculateNewPosition(
+                      finalExpectedPos,
+                      1,
+                      color,
+                      currentPosData.stepsFromStart,
+                      room.gameMode || 'classic',
+                      gameState.players[color].hasKilled || false
+                   );
+                   finalExpectedPos = typeof currentPosData === 'object' ? currentPosData.position : currentPosData;
+                   expectedPath.push(finalExpectedPos); // Add the jump step
+                }
+
+                if (newPos !== finalExpectedPos) {
+                   console.warn(`[SECURITY] Hacked move! Token jumped to ${newPos} but should be ${finalExpectedPos}`);
+                   isValidMove = false;
+                   break;
+                }
+
+                // Attach step-by-step path for frontend
+                moveAnimation = {
+                   color,
+                   tokenIndex: i,
+                   path: expectedPath
+                };
+              }
+            }
+          }
+        }
+
+        if (!isValidMove) {
+          if (callback) callback({ success: false, error: "Invalid move detected by secure backend" });
+          return; // Block update
+        }
+
+        if (moveAnimation) {
+           gameState.moveAnimation = moveAnimation;
+        }
+      }
+      // --- END BANK LEVEL SECURE MOVE VALIDATION ---
+
       room.gameState = gameState;
 
       // Mark room as game_over and schedule cleanup when a winner is set
