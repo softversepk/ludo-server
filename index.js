@@ -5491,7 +5491,19 @@ io.on("connection", (socket) => {
       const diceValue = Math.floor(Math.random() * 6) + 1;
       const { getAIMove } = require('./utils/aiPlayer');
       
-      const allPlayers = gameState.players;
+      // BANK LEVEL SECURITY: Prefer server-side authoritative state if available
+      let allPlayers = gameState.players;
+      let actualGameMode = gameMode;
+      
+      if (ludoGameServer && ludoGameServer.rooms && ludoGameServer.rooms.has(roomCode)) {
+        const serverRoom = ludoGameServer.rooms.get(roomCode);
+        if (serverRoom && serverRoom.gameState && serverRoom.gameState.players) {
+          allPlayers = serverRoom.gameState.players;
+          actualGameMode = serverRoom.gameMode || serverRoom.mode || gameMode;
+          console.log(`🔒 [SECURITY] Using authoritative server state for AI move in room ${roomCode}`);
+        }
+      }
+      
       let tokenIndex = null;
       
       if (allPlayers && allPlayers[targetPlayerForAI]) {
@@ -5501,7 +5513,7 @@ io.on("connection", (socket) => {
           targetPlayerForAI,
           allPlayers,
           difficulty,
-          gameMode
+          actualGameMode
         );
       }
 
