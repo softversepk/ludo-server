@@ -6,12 +6,163 @@ const GAME_STATE = {
 
 const RewardServiceServer = require('./rewardServiceServer');
 
+// ─────────────────────────────────────────────
+// BANK-LEVEL SECURITY: Rate Limiting & Anti-Cheat
+// ─────────────────────────────────────────────
+const RATE_LIMITS = {
+  MOVES_PER_SECOND: 5, // Max moves per second per player
+  MOVES_PER_MINUTE: 100, // Max moves per minute per player
+  SUSPICION_THRESHOLD: 10, // Moves within 100ms triggers suspicion
+};
+
+// Track player move history for rate limiting and anti-cheat
+const playerMoveHistory = new Map(); // playerId -> { moves: [timestamp], suspiciousCount: number }
+
+// Security: Validate and sanitize all inputs
+function sanitizeInput(value, type, allowedValues = null) {
+  if (value === null || value === undefined) return null;
+  
+  switch (type) {
+    case 'string':
+      if (typeof value !== 'string') return null;
+      // Prevent injection attacks
+      return value.replace(/[<>\"'`]/g, '').substring(0, 100);
+    
+    case 'number':
+      const num = Number(value);
+      if (!Number.isFinite(num)) return null;
+      return num;
+    
+    case 'integer':
+      if (!Number.isInteger(value)) return null;
+      return value;
+    
+    case 'enum':
+      if (!allowedValues || !allowedValues.includes(value)) return null;
+      return value;
+    
+    default:
+      return null;
+  }
+}
+
+// Security: Check rate limits
+function checkRateLimit(playerId, socketId) {
+  const now = Date.now();
+  
+  if (!playerMoveHistory.has(playerId)) {
+    playerMoveHistory.set(playerId, { moves: [], suspiciousCount: 0 });
+  }
+  
+  const history = playerMoveHistory.get(playerId);
+  
+  // Remove moves older than 1 minute
+  history.moves = history.moves.filter(timestamp => now - timestamp < 60000);
+  
+  // Check moves per minute
+  if (history.moves.length >= RATE_LIMITS.MOVES_PER_MINUTE) {
+    console.warn(`🚨 [SECURITY] Player ${playerId} exceeded moves per minute limit`);
+    return { allowed: false, reason: 'rate_limit_minute' };
+  }
+  
+  // Check moves per second (last 1 second)
+  const recentMoves = history.moves.filter(timestamp => now - timestamp < 1000);
+  if (recentMoves.length >= RATE_LIMITS.MOVES_PER_SECOND) {
+    console.warn(`🚨 [SECURITY] Player ${playerId} exceeded moves per second limit`);
+    return { allowed: false, reason: 'rate_limit_second' };
+  }
+  
+  // Check for suspiciously fast moves (< 100ms between moves)
+  if (history.moves.length > 0) {
+    const lastMove = history.moves[history.moves.length - 1];
+    if (now - lastMove < 100) {
+      history.suspiciousCount++;
+      if (history.suspiciousCount >= RATE_LIMITS.SUSPICION_THRESHOLD) {
+        console.warn(`🚨 [SECURITY] Player ${playerId} flagged for suspicious activity (${history.suspiciousCount} fast moves)`);
+        return { allowed: false, reason: 'suspicious_activity' };
+      }
+    } else {
+      // Reset suspicious count if moves are normal pace
+      history.suspiciousCount = Math.max(0, history.suspiciousCount - 1);
+    }
+  }
+  
+  // Add current move
+  history.moves.push(now);
+  
+  return { allowed: true };
+}
+
+// Security: Validate game state integrity
+function validateGameState(gameState) {
+  if (!gameState || typeof gameState !== 'object') return false;
+  
+  // Validate board
+  if (!Array.isArray(gameState.board) || gameState.board.length !== 9) return false;
+  
+  // Validate all board cells are null, 'X', or 'O'
+  for (const cell of gameState.board) {
+    if (cell !== null && cell !== 'X' && cell !== 'O') return false;
+  }
+  
+  // Validate players
+  if (!gameState.players || typeof gameState.players !== 'object') return false;
+  if (!gameState.players.X || !gameState.players.O) return false;
+  
+  // Validate turn flag
+  if (typeof gameState.xIsNext !== 'boolean') return false;
+  
+  // Validate move counts (X should have equal or one more move than O)
+  const xCount = gameState.board.filter(cell => cell === 'X').length;
+  const oCount = gameState.board.filter(cell => cell === 'O').length;
+  
+  if (xCount < oCount || xCount > oCount + 1) {
+    console.warn(`🚨 [SECURITY] Invalid move counts: X=${xCount}, O=${oCount}`);
+    return false;
+  }
+  
+  // Validate turn consistency
+  if (gameState.xIsNext && xCount > oCount) {
+    console.warn(`🚨 [SECURITY] Turn inconsistency: X's turn but X has more moves`);
+    return false;
+  }
+  if (!gameState.xIsNext && xCount === oCount) {
+    console.warn(`🚨 [SECURITY] Turn inconsistency: O's turn but move counts equal`);
+    return false;
+  }
+  
+  return true;
+}
+
 class TicTacToeGameServer {
   constructor(io, roomsMap, admin, userSockets) {
     this.io = io;
     this.rooms = roomsMap; // Reference to the shared rooms object in index.js
     this.admin = admin;
     this.userSockets = userSockets || {};
+    
+    // Start periodic cleanup of rate limit history
+    this.startRateLimitCleanup();
+  }
+
+  // Cleanup old rate limit data to prevent memory leaks
+  startRateLimitCleanup() {
+    setInterval(() => {
+      const now = Date.now();
+      const CLEANUP_AGE = 600000; // 10 minutes
+      
+      for (const [playerId, history] of playerMoveHistory.entries()) {
+        // Remove very old moves
+        history.moves = history.moves.filter(timestamp => now - timestamp < CLEANUP_AGE);
+        
+        // Remove entry if no recent moves
+        if (history.moves.length === 0) {
+          playerMoveHistory.delete(playerId);
+        }
+      }
+      
+      console.log(`🧹 [TicTacToe] Rate limit cleanup: ${playerMoveHistory.size} active players`);
+    }, 300000); // Run every 5 minutes
   }
 
   initialize() {
@@ -42,13 +193,19 @@ class TicTacToeGameServer {
 
   handleResign(socket, { roomId, playerRole }) {
     try {
-      // SECURITY: Strict Input Validation
-      if (!roomId || typeof roomId !== 'string') {
-        console.warn(`[TicTacToe] Security Alert: Invalid roomId in resign`);
+      // ═══════════════════════════════════════════════════════════════
+      // BANK-LEVEL SECURITY: Input Validation
+      // ═══════════════════════════════════════════════════════════════
+      
+      roomId = sanitizeInput(roomId, 'string');
+      if (!roomId) {
+        console.warn(`🚨 [SECURITY] Invalid roomId in resign from socket ${socket.id}`);
         return;
       }
-      if (playerRole !== 'X' && playerRole !== 'O') {
-        console.warn(`[TicTacToe] Security Alert: Invalid playerRole in resign`);
+      
+      playerRole = sanitizeInput(playerRole, 'enum', ['X', 'O']);
+      if (!playerRole) {
+        console.warn(`🚨 [SECURITY] Invalid playerRole in resign from socket ${socket.id}`);
         return;
       }
 
@@ -58,25 +215,31 @@ class TicTacToeGameServer {
       const gameState = room.gameState;
       if (gameState.winner) return;
 
-      // SECURITY: Validate that the socket making the request belongs to the claimed playerRole
+      // ═══════════════════════════════════════════════════════════════
+      // SECURITY: Player Authentication
+      // ═══════════════════════════════════════════════════════════════
+      
       const playerId = gameState.players[playerRole];
       if (!playerId) return;
 
-      // Ensure socket is authenticated and matches playerId
+      // CRITICAL: Verify socket belongs to the player
       if (socket.userId && socket.userId !== playerId) {
-        console.warn(`[TicTacToe] Security Alert: Socket ${socket.id} (User: ${socket.userId}) attempted to resign for player ${playerId}`);
+        console.warn(`🚨 [SECURITY BREACH] Socket ${socket.id} (User: ${socket.userId}) attempted to resign for player ${playerId}`);
         return;
       }
 
       const expectedSocketId = this.userSockets[playerId] || (room.players[playerId] && room.players[playerId].socketId);
       if (!socket.userId && (!expectedSocketId || socket.id !== expectedSocketId)) {
-        console.warn(`[TicTacToe] Security Alert: Socket ${socket.id} attempted to resign for player ${playerId} (role ${playerRole}) but expected socket ${expectedSocketId}`);
+        console.warn(`🚨 [SECURITY BREACH] Socket ${socket.id} attempted to resign for player ${playerId} (role ${playerRole}) but expected socket ${expectedSocketId}`);
         return;
       }
 
+      // Mark player as resigned
       gameState.playerLeft = playerRole;
       gameState.winner = playerRole === 'X' ? 'O' : 'X';
       room.status = 'game_over';
+
+      console.log(`🏳️ [TicTacToe] Player ${playerRole} resigned from game ${roomId}`);
 
       this.io.to(roomId).emit("game_state_update", gameState);
 
@@ -90,7 +253,7 @@ class TicTacToeGameServer {
         }
       }
     } catch (error) {
-      console.error("[TicTacToe] Resign error:", error);
+      console.error("❌ [TicTacToe] Resign error:", error);
     }
   }
 
@@ -156,67 +319,150 @@ class TicTacToeGameServer {
 
   handleMakeMove(socket, { roomId, index, playerRole }) {
     try {
-      // SECURITY: Strict Input Validation
-      if (!roomId || typeof roomId !== 'string') {
-        console.warn(`[TicTacToe] Security Alert: Invalid roomId in make_move`);
+      // ═══════════════════════════════════════════════════════════════
+      // BANK-LEVEL SECURITY: Comprehensive Input Validation
+      // ═══════════════════════════════════════════════════════════════
+      
+      // 1. Sanitize and validate roomId
+      roomId = sanitizeInput(roomId, 'string');
+      if (!roomId) {
+        console.warn(`🚨 [SECURITY] Invalid roomId in make_move from socket ${socket.id}`);
+        socket.emit('game_error', { message: 'Invalid room ID' });
         return;
       }
-      if (typeof index !== 'number' || !Number.isInteger(index) || index < 0 || index > 8) {
-        console.warn(`[TicTacToe] Security Alert: Invalid move index ${index} by socket ${socket.id}`);
+      
+      // 2. Validate index (must be integer 0-8)
+      index = sanitizeInput(index, 'integer');
+      if (index === null || index < 0 || index > 8) {
+        console.warn(`🚨 [SECURITY] Invalid move index ${index} from socket ${socket.id}`);
+        socket.emit('game_error', { message: 'Invalid move position' });
         return;
       }
-      if (playerRole !== 'X' && playerRole !== 'O') {
-        console.warn(`[TicTacToe] Security Alert: Invalid playerRole ${playerRole} in make_move`);
+      
+      // 3. Validate playerRole (must be 'X' or 'O')
+      playerRole = sanitizeInput(playerRole, 'enum', ['X', 'O']);
+      if (!playerRole) {
+        console.warn(`🚨 [SECURITY] Invalid playerRole from socket ${socket.id}`);
+        socket.emit('game_error', { message: 'Invalid player role' });
         return;
       }
 
+      // ═══════════════════════════════════════════════════════════════
+      // SECURITY: Room and Game State Validation
+      // ═══════════════════════════════════════════════════════════════
+      
       const room = this.rooms[roomId];
-      if (!room || !room.gameState) return;
+      if (!room) {
+        console.warn(`🚨 [SECURITY] Room ${roomId} not found`);
+        socket.emit('game_error', { message: 'Room not found' });
+        return;
+      }
+      
+      if (!room.gameState) {
+        console.warn(`🚨 [SECURITY] Game state not initialized for room ${roomId}`);
+        socket.emit('game_error', { message: 'Game not initialized' });
+        return;
+      }
 
       const gameState = room.gameState;
       
-      // Validations
-      if (gameState.winner) return; // Game already over
-      if (gameState.board[index] !== null) return; // Cell already taken
+      // 4. Validate game is not already over
+      if (gameState.winner) {
+        console.warn(`🚨 [SECURITY] Attempted move in finished game ${roomId}`);
+        socket.emit('game_error', { message: 'Game already finished' });
+        return;
+      }
       
-      // SECURITY: Validate that the socket making the move belongs to the claimed playerRole
+      // 5. Validate cell is empty
+      if (gameState.board[index] !== null) {
+        console.warn(`🚨 [SECURITY] Attempted move on occupied cell ${index} in room ${roomId}`);
+        socket.emit('game_error', { message: 'Cell already occupied' });
+        return;
+      }
+      
+      // ═══════════════════════════════════════════════════════════════
+      // SECURITY: Player Authentication & Authorization
+      // ═══════════════════════════════════════════════════════════════
+      
       const playerId = gameState.players[playerRole];
       if (!playerId) {
-        console.warn(`[TicTacToe] Player ID not found for role ${playerRole}`);
+        console.warn(`🚨 [SECURITY] Player ID not found for role ${playerRole} in room ${roomId}`);
+        socket.emit('game_error', { message: 'Player not found' });
         return;
       }
 
-      // Ensure socket is authenticated and matches playerId
+      // 6. CRITICAL: Verify socket is authenticated and matches playerId
       if (socket.userId && socket.userId !== playerId) {
-        console.warn(`[TicTacToe] Security Alert: Socket ${socket.id} (User: ${socket.userId}) attempted to move for player ${playerId}`);
+        console.warn(`🚨 [SECURITY BREACH] Socket ${socket.id} (User: ${socket.userId}) attempted to move for player ${playerId}`);
+        socket.emit('game_error', { message: 'Unauthorized action' });
         return;
       }
 
-      // Allow if the socket matches the user's registered socket, OR if the socket matches the player's stored socketId
+      // 7. CRITICAL: Verify socket ID matches expected socket for this player
       const expectedSocketId = this.userSockets[playerId] || (room.players[playerId] && room.players[playerId].socketId);
       if (!socket.userId && (!expectedSocketId || socket.id !== expectedSocketId)) {
-        console.warn(`[TicTacToe] Security Alert: Socket ${socket.id} attempted to move for player ${playerId} (role ${playerRole}) but expected socket ${expectedSocketId}`);
+        console.warn(`🚨 [SECURITY BREACH] Socket ${socket.id} attempted to move for player ${playerId} (role ${playerRole}) but expected socket ${expectedSocketId}`);
+        socket.emit('game_error', { message: 'Socket authentication failed' });
         return;
       }
 
-      // SECURITY: Block clients from making moves for bots
+      // 8. CRITICAL: Prevent clients from making moves for bots
       const player = room.players[playerId];
       if (player && player.isBot) {
-        console.warn(`[TicTacToe] Security Alert: Socket ${socket.id} attempted to make move for BOT player ${playerId}`);
+        console.warn(`🚨 [SECURITY BREACH] Socket ${socket.id} attempted to make move for BOT player ${playerId}`);
+        socket.emit('game_error', { message: 'Cannot control bot player' });
         return;
       }
       
-      // Check turn
+      // ═══════════════════════════════════════════════════════════════
+      // SECURITY: Rate Limiting & Anti-Cheat
+      // ═══════════════════════════════════════════════════════════════
+      
+      // 9. Check rate limits
+      const rateLimitCheck = checkRateLimit(playerId, socket.id);
+      if (!rateLimitCheck.allowed) {
+        console.warn(`🚨 [SECURITY] Rate limit exceeded for player ${playerId}: ${rateLimitCheck.reason}`);
+        socket.emit('game_error', { message: 'Too many moves. Please slow down.' });
+        
+        // Escalate if suspicious activity
+        if (rateLimitCheck.reason === 'suspicious_activity') {
+          // Could implement auto-ban or additional logging here
+          console.error(`🚨 [SECURITY ESCALATION] Player ${playerId} flagged for potential bot/automation`);
+        }
+        return;
+      }
+      
+      // ═══════════════════════════════════════════════════════════════
+      // SECURITY: Turn Validation
+      // ═══════════════════════════════════════════════════════════════
+      
+      // 10. Verify it's the player's turn
       const expectedRole = gameState.xIsNext ? 'X' : 'O';
       if (playerRole !== expectedRole) {
-        console.warn(`[TicTacToe] Invalid turn. Expected ${expectedRole}, got ${playerRole}`);
-        return; 
+        console.warn(`🚨 [SECURITY] Invalid turn. Expected ${expectedRole}, got ${playerRole} from player ${playerId}`);
+        socket.emit('game_error', { message: 'Not your turn' });
+        return;
       }
 
+      // ═══════════════════════════════════════════════════════════════
+      // ALL SECURITY CHECKS PASSED - Apply Move
+      // ═══════════════════════════════════════════════════════════════
+      
       // Apply move
       gameState.board[index] = playerRole;
       gameState.xIsNext = !gameState.xIsNext;
       gameState.lastMove = index;
+      gameState.lastMoveTime = Date.now(); // Track move time for additional security
+
+      // Validate game state integrity after move
+      if (!validateGameState(gameState)) {
+        console.error(`🚨 [CRITICAL] Game state validation failed after move in room ${roomId}`);
+        // Rollback move
+        gameState.board[index] = null;
+        gameState.xIsNext = !gameState.xIsNext;
+        socket.emit('game_error', { message: 'Invalid game state' });
+        return;
+      }
 
       // Check for win or draw
       const winInfo = this.calculateWinner(gameState.board);
@@ -226,9 +472,11 @@ class TicTacToeGameServer {
         gameState.winner = winInfo.winner;
         gameState.winLine = winInfo.line;
         room.status = 'game_over';
+        console.log(`🏆 [TicTacToe] Game ${roomId} won by ${winInfo.winner}`);
       } else if (isDraw) {
         gameState.winner = 'draw';
         room.status = 'game_over';
+        console.log(`🤝 [TicTacToe] Game ${roomId} ended in draw`);
       }
 
       // Broadcast state update
@@ -249,7 +497,8 @@ class TicTacToeGameServer {
       }
 
     } catch (error) {
-      console.error("[TicTacToe] Move error:", error);
+      console.error(`❌ [TicTacToe] Critical error in handleMakeMove:`, error);
+      socket.emit('game_error', { message: 'An error occurred processing your move' });
     }
   }
 
@@ -334,7 +583,13 @@ class TicTacToeGameServer {
 
   handleTriggerBot(socket, { roomId }) {
     try {
-      if (!roomId || typeof roomId !== 'string') return;
+      // ═══════════════════════════════════════════════════════════════
+      // SECURITY: Input Validation
+      // ═══════════════════════════════════════════════════════════════
+      
+      roomId = sanitizeInput(roomId, 'string');
+      if (!roomId) return;
+      
       const room = this.rooms[roomId];
       if (!room || !room.gameState || room.status === 'game_over') return;
       
@@ -343,12 +598,15 @@ class TicTacToeGameServer {
       const playerId = gameState.players[expectedRole];
       const player = room.players[playerId];
 
-      // SECURITY: Validate that the socket triggering the bot belongs to the OTHER player
+      // ═══════════════════════════════════════════════════════════════
+      // SECURITY: Validate socket belongs to opponent
+      // ═══════════════════════════════════════════════════════════════
+      
       const otherRole = expectedRole === 'X' ? 'O' : 'X';
       const otherPlayerId = gameState.players[otherRole];
       
       if (socket.userId && socket.userId !== otherPlayerId) {
-        console.warn(`[TicTacToe] Security Alert: Socket ${socket.id} (User: ${socket.userId}) attempted to trigger bot but is not the opponent.`);
+        console.warn(`🚨 [SECURITY] Socket ${socket.id} (User: ${socket.userId}) attempted to trigger bot but is not the opponent.`);
         return;
       }
 
@@ -356,7 +614,7 @@ class TicTacToeGameServer {
         this.playBotTurn(roomId);
       }
     } catch (error) {
-      console.error("[TicTacToe] Trigger Bot error:", error);
+      console.error("❌ [TicTacToe] Trigger Bot error:", error);
     }
   }
 }
