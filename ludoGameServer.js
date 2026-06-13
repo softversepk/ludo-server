@@ -20,7 +20,6 @@ const TOKEN_STATE = {
 const RewardServiceServer = require('./rewardServiceServer');
 const { getAIMove, getAIThinkingDelay } = require('./utils/aiPlayer');
 const { AI_DIFFICULTY } = require('./utils/gameConstants');
-const crypto = require('crypto');
 
 class LudoGameServer {
   constructor(io, admin) {
@@ -28,32 +27,6 @@ class LudoGameServer {
     this.admin = admin;
     this.rooms = new Map();
     this.playerConnections = new Map(); // Track socket.id to room mapping
-    this._rateLimitMap = new Map();
-  }
-
-  /**
-   * Server-side rate limiter to prevent spam/DoS attacks
-   */
-  _checkRateLimit(userId, action, limit = 5, windowMs = 1000) {
-    if (!userId) return true; // Allow if no user ID (though usually rejected by auth)
-    const now = Date.now();
-    const key = `${userId}:${action}`;
-    const entry = this._rateLimitMap.get(key) || { count: 0, windowStart: now };
-
-    if (now - entry.windowStart > windowMs) {
-      entry.count = 1;
-      entry.windowStart = now;
-    } else {
-      entry.count += 1;
-    }
-
-    this._rateLimitMap.set(key, entry);
-
-    if (entry.count > limit) {
-      console.warn(`⚠️ [SECURITY] Rate limit exceeded for user ${userId} on action ${action}`);
-      return false;
-    }
-    return true;
   }
 
   /**
@@ -89,12 +62,6 @@ class LudoGameServer {
    */
   async handleJoinGame(socket, { roomId, playerId, playerData, token }) {
     try {
-      // Throttle join attempts to max 2 per second
-      if (!this._checkRateLimit(playerId || socket.id, 'join_game', 2, 1000)) {
-        socket.emit('ludo:join_error', { error: 'Too many join requests. Please wait.' });
-        return;
-      }
-
       console.log(`🎮 [JOIN] Player ${playerId} joining room ${roomId}`);
 
       // SECURITY: Token-based Authentication
@@ -204,11 +171,6 @@ class LudoGameServer {
    */
   handleLeaveGame(socket, { roomId, playerId }) {
     try {
-      // Throttle leave requests to max 2 per second
-      if (!this._checkRateLimit(playerId || socket.id, 'leave_game', 2, 1000)) {
-        return;
-      }
-
       console.log(`👋 [LEAVE] Player ${playerId} leaving room ${roomId}`);
 
       // SECURITY: Validate authenticated socket
@@ -305,11 +267,6 @@ class LudoGameServer {
    */
   handleStartGame(socket, { roomId, playerId }) {
     try {
-      // Throttle start requests to max 2 per second
-      if (!this._checkRateLimit(playerId || socket.id, 'start_game', 2, 1000)) {
-        return;
-      }
-
       console.log(`🎬 [START] Starting game in room ${roomId}`);
 
       // SECURITY: Validate authenticated socket
@@ -395,7 +352,7 @@ class LudoGameServer {
         if (!this.rooms.has(roomId) || room.gameState.status !== GAME_STATE.ROLLING || room.gameState.currentPlayer !== currentColor) return;
 
         // Roll dice
-        const diceValue = crypto.randomInt(1, 7);
+        const diceValue = Math.floor(Math.random() * 6) + 1;
         room.gameState.diceValue = diceValue;
         room.gameState.lastDiceRoll = Date.now();
 
@@ -548,30 +505,15 @@ class LudoGameServer {
    */
   handleRollDice(socket, { roomId, playerId }) {
     try {
-      // Rate limiting: max 5 rolls per second per user
-      if (!this._checkRateLimit(playerId, 'roll_dice', 5, 1000)) {
-        return;
-      }
-
       const room = this.rooms.get(roomId);
       if (!room) return;
 
-      if (room.isProcessing) {
-        console.warn(`[Ludo] Room ${roomId} is processing another action. Ignoring roll.`);
-        return;
-      }
-      room.isProcessing = true;
-
       const player = room.players[playerId];
-      if (!player) {
-        room.isProcessing = false;
-        return;
-      }
+      if (!player) return;
 
       // SECURITY: Validate authenticated socket
       if (socket.userId && socket.userId !== playerId) {
         console.warn(`[Ludo] Security Alert: Socket ${socket.id} (User: ${socket.userId}) attempted to roll dice for player ${playerId}`);
-        room.isProcessing = false;
         return;
       }
 
@@ -579,7 +521,6 @@ class LudoGameServer {
       const expectedSocketId = player.socketId;
       if (!socket.userId && expectedSocketId && socket.id !== expectedSocketId) {
         console.warn(`[Ludo] Security Alert: Socket ${socket.id} attempted to roll dice for player ${playerId} but expected socket ${expectedSocketId}`);
-        room.isProcessing = false;
         return;
       }
 
@@ -589,19 +530,17 @@ class LudoGameServer {
           error: 'Not your turn',
           currentPlayer: room.gameState.currentPlayer
         });
-        room.isProcessing = false;
         return;
       }
 
       // Validate: Should be in ROLLING state
       if (room.gameState.status !== GAME_STATE.ROLLING) {
         socket.emit('ludo:action_error', { error: 'Cannot roll now' });
-        room.isProcessing = false;
         return;
       }
 
-      // Roll dice (cryptographically secure random for fairness and security)
-      const diceValue = crypto.randomInt(1, 7);
+      // Roll dice (server-side random for fairness)
+      const diceValue = Math.floor(Math.random() * 6) + 1;
       room.gameState.diceValue = diceValue;
       room.gameState.lastDiceRoll = Date.now();
 
@@ -653,12 +592,8 @@ class LudoGameServer {
       });
 
       console.log(`🎲 [DICE] ${player.color} rolled ${diceValue}. Accumulated: ${room.gameState.accumulatedDice}. Valid moves: ${room.gameState.validMoves?.length}`);
-      room.isProcessing = false;
     } catch (error) {
       console.error('❌ [DICE ERROR]', error);
-      if (this.rooms.has(roomId)) {
-        this.rooms.get(roomId).isProcessing = false;
-      }
       socket.emit('ludo:action_error', { error: error.message });
     }
   }
@@ -668,30 +603,15 @@ class LudoGameServer {
    */
   async handleUndoRoll(socket, { roomId, playerId }) {
     try {
-      // Rate limit undo roll (e.g. 1 per second)
-      if (!this._checkRateLimit(playerId, 'undo_roll', 1, 1000)) {
-        return;
-      }
-
       const room = this.rooms.get(roomId);
       if (!room) return;
 
-      if (room.isProcessing) {
-        console.warn(`[Ludo] Room ${roomId} is processing another action. Ignoring undo roll.`);
-        return;
-      }
-      room.isProcessing = true;
-
       const player = room.players[playerId];
-      if (!player) {
-        room.isProcessing = false;
-        return;
-      }
+      if (!player) return;
 
       // SECURITY: Validate authenticated socket
       if (socket.userId && socket.userId !== playerId) {
         console.warn(`[Ludo] Security Alert: Socket ${socket.id} (User: ${socket.userId}) attempted to undo roll for player ${playerId}`);
-        room.isProcessing = false;
         return;
       }
 
@@ -699,21 +619,18 @@ class LudoGameServer {
       const expectedSocketId = player.socketId;
       if (!socket.userId && expectedSocketId && socket.id !== expectedSocketId) {
         console.warn(`[Ludo] Security Alert: Socket ${socket.id} attempted to undo roll for player ${playerId} but expected socket ${expectedSocketId}`);
-        room.isProcessing = false;
         return;
       }
 
       // Validate: Is it this player's turn?
       if (player.color !== room.gameState.currentPlayer) {
         socket.emit('ludo:action_error', { error: 'Not your turn' });
-        room.isProcessing = false;
         return;
       }
 
       // Validate: Should be in MOVING state and have a dice value
       if (room.gameState.status !== GAME_STATE.MOVING || room.gameState.diceValue === null) {
         socket.emit('ludo:action_error', { error: 'Cannot undo roll right now' });
-        room.isProcessing = false;
         return;
       }
 
@@ -752,7 +669,7 @@ class LudoGameServer {
       }
 
       // Generate new dice roll
-      const diceValue = crypto.randomInt(1, 7);
+      const diceValue = Math.floor(Math.random() * 6) + 1;
       room.gameState.diceValue = diceValue;
       room.gameState.lastDiceRoll = Date.now();
 
@@ -804,13 +721,9 @@ class LudoGameServer {
       
       socket.emit('ludo:undo_success', { diamondsDeducted: 5 });
       console.log(`⏪ [UNDO] ${player.color} paid 5 diamonds and re-rolled ${diceValue}. Accumulated: ${room.gameState.accumulatedDice}`);
-      room.isProcessing = false;
 
     } catch (error) {
       console.error('❌ [UNDO ERROR]', error);
-      if (this.rooms.has(roomId)) {
-        this.rooms.get(roomId).isProcessing = false;
-      }
       socket.emit('ludo:action_error', { error: error.message });
     }
   }
@@ -820,30 +733,15 @@ class LudoGameServer {
    */
   handleMoveToken(socket, { roomId, playerId, tokenIndex }) {
     try {
-      // Rate limiting: max 10 moves per second per user
-      if (!this._checkRateLimit(playerId, 'move_token', 10, 1000)) {
-        return;
-      }
-
       const room = this.rooms.get(roomId);
       if (!room) return;
 
-      if (room.isProcessing) {
-        console.warn(`[Ludo] Room ${roomId} is processing another action. Ignoring move.`);
-        return;
-      }
-      room.isProcessing = true;
-
       const player = room.players[playerId];
-      if (!player) {
-        room.isProcessing = false;
-        return;
-      }
+      if (!player) return;
 
       // SECURITY: Validate authenticated socket
       if (socket.userId && socket.userId !== playerId) {
         console.warn(`[Ludo] Security Alert: Socket ${socket.id} (User: ${socket.userId}) attempted to move token for player ${playerId}`);
-        room.isProcessing = false;
         return;
       }
 
@@ -851,35 +749,30 @@ class LudoGameServer {
       const expectedSocketId = player.socketId;
       if (!socket.userId && expectedSocketId && socket.id !== expectedSocketId) {
         console.warn(`[Ludo] Security Alert: Socket ${socket.id} attempted to move token for player ${playerId} but expected socket ${expectedSocketId}`);
-        room.isProcessing = false;
         return;
       }
 
       // SECURITY: Block clients from moving for bots
       if (player.isBot) {
         console.warn(`[Ludo] Security Alert: Socket ${socket.id} attempted to move token for BOT player ${playerId}`);
-        room.isProcessing = false;
         return;
       }
 
       // Validate: Is it this player's turn?
       if (player.color !== room.gameState.currentPlayer) {
         socket.emit('ludo:action_error', { error: 'Not your turn' });
-        room.isProcessing = false;
         return;
       }
 
       // Validate: Should be in MOVING state
       if (room.gameState.status !== GAME_STATE.MOVING) {
         socket.emit('ludo:action_error', { error: 'Not in moving state' });
-        room.isProcessing = false;
         return;
       }
 
       // Validate: Is this token in valid moves?
       if (!room.gameState.validMoves.includes(tokenIndex)) {
         socket.emit('ludo:action_error', { error: 'Invalid token selection' });
-        room.isProcessing = false;
         return;
       }
 
@@ -907,12 +800,8 @@ class LudoGameServer {
       if (moveResult.won) {
         this.handlePlayerWin(room, moveResult.targetColor || player.color);
       }
-      room.isProcessing = false;
     } catch (error) {
       console.error('❌ [MOVE ERROR]', error);
-      if (this.rooms.has(roomId)) {
-        this.rooms.get(roomId).isProcessing = false;
-      }
       socket.emit('ludo:action_error', { error: error.message });
     }
   }
@@ -922,27 +811,15 @@ class LudoGameServer {
    */
   handleSkipTurn(socket, { roomId, playerId }) {
     try {
-      // Rate limiting: max 3 skips per second per user
-      if (!this._checkRateLimit(playerId, 'skip_turn', 3, 1000)) {
-        return;
-      }
-
       const room = this.rooms.get(roomId);
       if (!room) return;
 
-      if (room.isProcessing) return;
-      room.isProcessing = true;
-
       const player = room.players[playerId];
-      if (!player || player.color !== room.gameState.currentPlayer) {
-        room.isProcessing = false;
-        return;
-      }
+      if (!player || player.color !== room.gameState.currentPlayer) return;
 
       // SECURITY: Validate authenticated socket
       if (socket.userId && socket.userId !== playerId) {
         console.warn(`[Ludo] Security Alert: Socket ${socket.id} (User: ${socket.userId}) attempted to skip turn for player ${playerId}`);
-        room.isProcessing = false;
         return;
       }
 
@@ -950,14 +827,12 @@ class LudoGameServer {
       const expectedSocketId = player.socketId;
       if (!socket.userId && expectedSocketId && socket.id !== expectedSocketId) {
         console.warn(`[Ludo] Security Alert: Socket ${socket.id} attempted to skip turn for player ${playerId} but expected socket ${expectedSocketId}`);
-        room.isProcessing = false;
         return;
       }
 
       // SECURITY: Block clients from skipping turns for bots
       if (player.isBot) {
         console.warn(`[Ludo] Security Alert: Socket ${socket.id} attempted to skip turn for BOT player ${playerId}`);
-        room.isProcessing = false;
         return;
       }
 
@@ -970,12 +845,8 @@ class LudoGameServer {
         status: room.gameState.status,
         timestamp: Date.now()
       });
-      room.isProcessing = false;
     } catch (error) {
       console.error('❌ [SKIP ERROR]', error);
-      if (this.rooms.has(roomId)) {
-        this.rooms.get(roomId).isProcessing = false;
-      }
     }
   }
 
@@ -984,11 +855,6 @@ class LudoGameServer {
    */
   handleRequestSync(socket, { roomId, playerId }) {
     try {
-      // Throttle sync requests to max 2 per second
-      if (!this._checkRateLimit(playerId, 'request_sync', 2, 1000)) {
-        return;
-      }
-
       const room = this.rooms.get(roomId);
       if (!room) return;
 
@@ -1008,11 +874,6 @@ class LudoGameServer {
    * Handle heartbeat for connection monitoring
    */
   handleHeartbeat(socket, { roomId, playerId }) {
-    // Throttle heartbeat to max 1 per 5 seconds
-    if (!this._checkRateLimit(playerId, 'heartbeat', 1, 5000)) {
-      return;
-    }
-
     const room = this.rooms.get(roomId);
     if (!room || !room.players[playerId]) return;
 
