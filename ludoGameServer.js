@@ -731,23 +731,13 @@ class LudoGameServer {
       }
       room.gameState.lastDiceValues[player.color] = diceValue;
 
-      // CRITICAL FIX: When undo is called, we must DISCARD the old dice value completely
-      // The old value should NOT remain in the arrays - this prevents hacking/exploitation
-      if (!room.gameState.accumulatedDice) room.gameState.accumulatedDice = [];
-      if (!room.gameState.turnDiceValues) room.gameState.turnDiceValues = [];
+      // CRITICAL FIX: When undo is called, COMPLETELY DISCARD ALL old dice values
+      // The player should only see the NEW dice value after undo, not the old ones
+      // This prevents accumulation and confusion
       
-      // SECURITY: Clear the current dice being processed and replace with new one
-      // Remove the last added dice (which was the old one being undone)
-      if (room.gameState.accumulatedDice.length > 0) {
-        room.gameState.accumulatedDice.shift(); // Remove the old dice value
-      }
-      if (room.gameState.turnDiceValues.length > 0) {
-        room.gameState.turnDiceValues.shift(); // Remove the old dice value from turn history
-      }
-      
-      // Now add the new dice value
-      room.gameState.accumulatedDice.unshift(diceValue);
-      room.gameState.turnDiceValues.unshift(diceValue);
+      // COMPLETE RESET: Clear all accumulated dice arrays and start fresh
+      room.gameState.accumulatedDice = [diceValue]; // Only the new dice value
+      room.gameState.turnDiceValues = [diceValue];  // Only the new dice value for display
       
       // AUDIT LOG: Record undo action for security monitoring
       if (!room.undoAuditLog) room.undoAuditLog = [];
@@ -769,23 +759,14 @@ class LudoGameServer {
       room.undoRateLimiter[playerId] = Date.now();
       room.undoCountPerTurn[player.color]++;
 
-      // Count consecutive sixes securely in backend
-      const consecutiveSixesCount = room.gameState.accumulatedDice.filter(d => d === 6).length;
-
+      // Handle the new dice value logic
+      // Note: After undo, we start fresh - no consecutive sixes tracking from before undo
       if (diceValue === 6) {
-        if (consecutiveSixesCount >= 3) {
-          // 3 consecutive sixes: turn is cancelled
-          console.log(`🚫 [RULE] ${player.color} rolled 3 consecutive sixes after undo. Turn cancelled.`);
-          room.gameState.accumulatedDice = [];
-          room.gameState.validMoves = [];
-          this.nextTurn(room);
-        } else {
-          // Roll again
-          room.gameState.status = GAME_STATE.ROLLING;
-          room.gameState.validMoves = [];
-        }
+        // Player rolled a 6 after undo - they get another roll
+        room.gameState.status = GAME_STATE.ROLLING;
+        room.gameState.validMoves = [];
       } else {
-        // Process next accumulated dice
+        // Process the new dice for moving
         this.processNextAccumulatedDice(room, player.color);
       }
 
