@@ -684,7 +684,14 @@ class LudoGameServer {
       room.gameState.accumulatedDice.unshift(diceValue); // Add it to the front so it gets processed next
 
       if (!room.gameState.turnDiceValues) room.gameState.turnDiceValues = [];
-      room.gameState.turnDiceValues.unshift(diceValue);
+      
+      // Replace the current undone dice in turnDiceValues
+      const currentIndex = room.gameState.turnDiceValues.length - room.gameState.accumulatedDice.length;
+      if (currentIndex >= 0 && currentIndex < room.gameState.turnDiceValues.length) {
+        room.gameState.turnDiceValues[currentIndex] = diceValue;
+      } else {
+        room.gameState.turnDiceValues.unshift(diceValue);
+      }
 
       // Count consecutive sixes securely in backend
       const consecutiveSixesCount = room.gameState.accumulatedDice.filter(d => d === 6).length;
