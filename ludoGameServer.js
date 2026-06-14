@@ -599,7 +599,7 @@ class LudoGameServer {
   }
 
   /**
-   * Handle undo roll (Secure backend deduction)
+   * Handle undo roll (Secure backend deduction with bank-level security)
    */
   async handleUndoRoll(socket, { roomId, playerId }) {
     try {
@@ -612,6 +612,11 @@ class LudoGameServer {
       // SECURITY: Validate authenticated socket
       if (socket.userId && socket.userId !== playerId) {
         console.warn(`[Ludo] Security Alert: Socket ${socket.id} (User: ${socket.userId}) attempted to undo roll for player ${playerId}`);
+        socket.emit('ludo:security_violation', { 
+          error: 'Authentication violation detected',
+          action: 'undo_roll',
+          severity: 'high'
+        });
         return;
       }
 
@@ -619,6 +624,18 @@ class LudoGameServer {
       const expectedSocketId = player.socketId;
       if (!socket.userId && expectedSocketId && socket.id !== expectedSocketId) {
         console.warn(`[Ludo] Security Alert: Socket ${socket.id} attempted to undo roll for player ${playerId} but expected socket ${expectedSocketId}`);
+        socket.emit('ludo:security_violation', { 
+          error: 'Socket validation failed',
+          action: 'undo_roll',
+          severity: 'high'
+        });
+        return;
+      }
+
+      // SECURITY: Block bot players from using undo (bots don't pay diamonds)
+      if (player.isBot) {
+        console.warn(`[Ludo] Security Alert: Attempted undo for BOT player ${playerId}`);
+        socket.emit('ludo:action_error', { error: 'Bots cannot use undo feature' });
         return;
       }
 
@@ -634,7 +651,40 @@ class LudoGameServer {
         return;
       }
 
+      // SECURITY: Rate limiting - prevent spam/abuse of undo feature
+      if (!room.undoRateLimiter) room.undoRateLimiter = {};
+      const now = Date.now();
+      const lastUndoTime = room.undoRateLimiter[playerId] || 0;
+      const timeSinceLastUndo = now - lastUndoTime;
+      
+      // Minimum 2 seconds between undo attempts to prevent rapid fire exploitation
+      if (timeSinceLastUndo < 2000) {
+        console.warn(`[Ludo] Security Alert: Player ${playerId} attempting rapid undo (${timeSinceLastUndo}ms since last)`);
+        socket.emit('ludo:action_error', { 
+          error: 'Please wait before using undo again',
+          remainingTime: Math.ceil((2000 - timeSinceLastUndo) / 1000)
+        });
+        return;
+      }
+
+      // SECURITY: Limit undos per turn to prevent infinite re-rolling
+      if (!room.undoCountPerTurn) room.undoCountPerTurn = {};
+      if (!room.undoCountPerTurn[player.color]) room.undoCountPerTurn[player.color] = 0;
+      
+      const maxUndosPerTurn = 3; // Maximum 3 undos per turn
+      if (room.undoCountPerTurn[player.color] >= maxUndosPerTurn) {
+        console.warn(`[Ludo] Security Alert: Player ${playerId} exceeded max undos per turn (${room.undoCountPerTurn[player.color]})`);
+        socket.emit('ludo:action_error', { 
+          error: `Maximum ${maxUndosPerTurn} undos per turn allowed`
+        });
+        return;
+      }
+
       // SECURITY: Prevent race conditions by locking state during async transaction
+      if (room.gameState.status === 'undoing') {
+        socket.emit('ludo:action_error', { error: 'Undo already in progress' });
+        return;
+      }
       room.gameState.status = 'undoing';
 
       // Deduct diamonds using Firebase Admin
@@ -668,6 +718,9 @@ class LudoGameServer {
         throw txError;
       }
 
+      // SECURITY: Store the old dice value that was undone for audit trail
+      const oldDiceValue = room.gameState.diceValue;
+      
       // Generate new dice roll
       const diceValue = Math.floor(Math.random() * 6) + 1;
       room.gameState.diceValue = diceValue;
@@ -678,13 +731,43 @@ class LudoGameServer {
       }
       room.gameState.lastDiceValues[player.color] = diceValue;
 
-      // Update the accumulated dice array with the new dice
-      // if they undo, we are replacing the currently processed dice
+      // CRITICAL FIX: When undo is called, we must DISCARD the old dice value completely
+      // The old value should NOT remain in the arrays - this prevents hacking/exploitation
       if (!room.gameState.accumulatedDice) room.gameState.accumulatedDice = [];
-      room.gameState.accumulatedDice.unshift(diceValue); // Add it to the front so it gets processed next
-
       if (!room.gameState.turnDiceValues) room.gameState.turnDiceValues = [];
+      
+      // SECURITY: Clear the current dice being processed and replace with new one
+      // Remove the last added dice (which was the old one being undone)
+      if (room.gameState.accumulatedDice.length > 0) {
+        room.gameState.accumulatedDice.shift(); // Remove the old dice value
+      }
+      if (room.gameState.turnDiceValues.length > 0) {
+        room.gameState.turnDiceValues.shift(); // Remove the old dice value from turn history
+      }
+      
+      // Now add the new dice value
+      room.gameState.accumulatedDice.unshift(diceValue);
       room.gameState.turnDiceValues.unshift(diceValue);
+      
+      // AUDIT LOG: Record undo action for security monitoring
+      if (!room.undoAuditLog) room.undoAuditLog = [];
+      room.undoAuditLog.push({
+        playerId: playerId,
+        playerColor: player.color,
+        timestamp: Date.now(),
+        oldDiceValue: oldDiceValue,
+        newDiceValue: diceValue,
+        remainingAccumulated: [...room.gameState.accumulatedDice]
+      });
+      
+      // SECURITY: Limit audit log size to prevent memory issues
+      if (room.undoAuditLog.length > 100) {
+        room.undoAuditLog = room.undoAuditLog.slice(-50); // Keep last 50 entries
+      }
+
+      // SECURITY: Update rate limiter and turn counter
+      room.undoRateLimiter[playerId] = Date.now();
+      room.undoCountPerTurn[player.color]++;
 
       // Count consecutive sixes securely in backend
       const consecutiveSixesCount = room.gameState.accumulatedDice.filter(d => d === 6).length;
@@ -1279,6 +1362,12 @@ class LudoGameServer {
         nextIndex = (nextIndex + 1) % room.gameState.turnOrder.length;
         nextPlayer = room.gameState.turnOrder[nextIndex];
         loopCount++;
+    }
+
+    // SECURITY: Reset undo counter for the previous player's turn
+    const previousPlayer = room.gameState.currentPlayer;
+    if (room.undoCountPerTurn && previousPlayer) {
+      room.undoCountPerTurn[previousPlayer] = 0;
     }
 
     room.gameState.currentPlayer = nextPlayer;
