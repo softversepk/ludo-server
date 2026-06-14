@@ -678,23 +678,22 @@ class LudoGameServer {
       }
       room.gameState.lastDiceValues[player.color] = diceValue;
 
-      // Update the accumulated dice array with the new dice
-      // if they undo, we are replacing the currently processed dice
-      if (!room.gameState.accumulatedDice) room.gameState.accumulatedDice = [];
-      room.gameState.accumulatedDice.unshift(diceValue); // Add it to the front so it gets processed next
-
-      if (!room.gameState.turnDiceValues) room.gameState.turnDiceValues = [];
-      
-      // Replace the current undone dice in turnDiceValues
-      const currentIndex = room.gameState.turnDiceValues.length - room.gameState.accumulatedDice.length;
-      if (currentIndex >= 0 && currentIndex < room.gameState.turnDiceValues.length) {
-        room.gameState.turnDiceValues[currentIndex] = diceValue;
+      // 1. Replace the last roll in turnDiceValues
+      if (room.gameState.turnDiceValues && room.gameState.turnDiceValues.length > 0) {
+        room.gameState.turnDiceValues[room.gameState.turnDiceValues.length - 1] = diceValue;
       } else {
-        room.gameState.turnDiceValues.unshift(diceValue);
+        room.gameState.turnDiceValues = [diceValue];
       }
 
-      // Count consecutive sixes securely in backend
-      const consecutiveSixesCount = room.gameState.accumulatedDice.filter(d => d === 6).length;
+      // 2. Replace the last roll in accumulatedDice or diceValue
+      if (room.gameState.accumulatedDice && room.gameState.accumulatedDice.length > 0) {
+        room.gameState.accumulatedDice[room.gameState.accumulatedDice.length - 1] = diceValue;
+      } else {
+        room.gameState.diceValue = diceValue;
+      }
+
+      // 3. Count consecutive sixes securely in backend
+      const consecutiveSixesCount = room.gameState.turnDiceValues.filter(d => d === 6).length;
 
       if (diceValue === 6) {
         if (consecutiveSixesCount >= 3) {
@@ -707,9 +706,20 @@ class LudoGameServer {
           // Roll again
           room.gameState.status = GAME_STATE.ROLLING;
           room.gameState.validMoves = [];
+          
+          if (!room.gameState.accumulatedDice) room.gameState.accumulatedDice = [];
+          if (room.gameState.diceValue !== null) {
+            room.gameState.accumulatedDice.unshift(room.gameState.diceValue);
+            room.gameState.diceValue = null;
+          }
         }
       } else {
         // Process next accumulated dice
+        if (!room.gameState.accumulatedDice) room.gameState.accumulatedDice = [];
+        if (room.gameState.diceValue !== null) {
+          room.gameState.accumulatedDice.unshift(room.gameState.diceValue);
+          room.gameState.diceValue = null;
+        }
         this.processNextAccumulatedDice(room, player.color);
       }
 
